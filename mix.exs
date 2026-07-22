@@ -21,7 +21,8 @@ defmodule EctoFdbRelational.MixProject do
       test_coverage: [tool: ExCoveralls],
       dialyzer: [
         plt_add_apps: [:ex_unit, :mix],
-        flags: [:error_handling, :underspecs]
+        flags: [:error_handling, :underspecs],
+        ignore_warnings: ".dialyzer_ignore.exs"
       ]
     ]
   end
@@ -72,7 +73,8 @@ defmodule EctoFdbRelational.MixProject do
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
-      {:excoveralls, "~> 0.18", only: :test}
+      {:excoveralls, "~> 0.18", only: :test},
+      {:propcheck, "~> 1.5", only: :test}
     ]
   end
 

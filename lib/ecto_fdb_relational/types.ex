@@ -35,11 +35,17 @@ defmodule EctoFdbRelational.Types do
 
   alias Grpc.Relational.Jdbc.V1.Column
 
+  @typedoc """
+  Every value `encode_param/1`, `java_sql_type_code/1` and `encode_literal/1`
+  actually accept without raising -- the v0.1 scalar scope documented above.
+  """
+  @type scalar :: nil | boolean() | number() | Decimal.t() | binary()
+
   @doc """
   Encodes an Elixir term (already dumped by Ecto's type system) into a
   `Column` message suitable for `StatementRequest.parameters`.
   """
-  @spec encode_param(term()) :: Column.t()
+  @spec encode_param(scalar()) :: Column.t()
   def encode_param(nil), do: %Column{kind: {:nullType, 0}}
   def encode_param(value) when is_boolean(value), do: %Column{kind: {:boolean, value}}
   def encode_param(value) when is_integer(value), do: %Column{kind: {:long, value}}
@@ -73,7 +79,7 @@ defmodule EctoFdbRelational.Types do
   The `java.sql.Types` constant matching `encode_param/1`'s choice of
   `Column` variant for `value`, for `Parameter.java_sql_types_code`.
   """
-  @spec java_sql_type_code(term()) :: integer()
+  @spec java_sql_type_code(scalar()) :: integer()
   def java_sql_type_code(nil), do: @sql_type_null
   def java_sql_type_code(value) when is_boolean(value), do: @sql_type_boolean
   def java_sql_type_code(value) when is_integer(value), do: @sql_type_bigint
@@ -117,7 +123,7 @@ defmodule EctoFdbRelational.Types do
   FoundationDB/fdb-record-layer's own yaml-tests elsewhere in this
   adapter.
   """
-  @spec encode_literal(term()) :: String.t()
+  @spec encode_literal(scalar()) :: String.t()
   def encode_literal(nil), do: "NULL"
   def encode_literal(true), do: "TRUE"
   def encode_literal(false), do: "FALSE"
@@ -188,7 +194,20 @@ defmodule EctoFdbRelational.Types do
   `SQL_Getting_Started.md` (STRING/BIGINT/BOOLEAN/DOUBLE/BYTES -- FRL's own
   dialect, not standard SQL VARCHAR/INT).
   """
-  @spec ddl_type(atom() | tuple()) :: String.t()
+  @spec ddl_type(
+          :id
+          | :integer
+          | :bigint
+          | :string
+          | :boolean
+          | :float
+          | :decimal
+          | :binary
+          | :utc_datetime
+          | :naive_datetime
+          | :utc_datetime_usec
+          | :naive_datetime_usec
+        ) :: String.t()
   def ddl_type(:id), do: "BIGINT"
   def ddl_type(:integer), do: "BIGINT"
   def ddl_type(:bigint), do: "BIGINT"
