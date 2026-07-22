@@ -94,9 +94,19 @@ end
 config :my_app, MyApp.Repo,
   hostname: "localhost",
   port: 8123,                    # the -g gRPC port fdb-relational-server was started with
-  database: "/frl/my_app",
+  database: "/FRL/MY_APP",       # must be UPPERCASE -- see the note below
   relational_schema: "PUBLIC"    # optional, defaults to "PUBLIC"
 ```
+
+**`:database` must be uppercase.** FRL case-folds unquoted SQL
+identifiers in DDL text (`CREATE DATABASE /frl/my_app` is stored as
+`/FRL/MY_APP`) but uses the `database`/`schema` fields on regular
+statement requests literally, uncased. A lowercase `:database` config
+value creates a database via DDL that every later query then can't find,
+surfacing as `fdb-relational-server returned gRPC status 2: Database
+<path> does not exist` for statements against a database that
+demonstrably exists -- confirmed against a real server while building
+this adapter's CI (see `ADR.md`).
 
 Standing up the server this config talks to (verified working, Maven
 Central artifacts, no source build needed):
@@ -199,7 +209,8 @@ anything) unless you point it at one:
 
 ```sh
 FRL_TEST_PORT=8123 mix test test/ecto_fdb_relational/integration_test.exs
-# optional: FRL_TEST_HOST=localhost FRL_TEST_DATABASE=/frl/ecto_fdb_relational_test
+# optional: FRL_TEST_HOST=localhost FRL_TEST_DATABASE=/FRL/ECTO_FDB_RELATIONAL_TEST
+# (FRL_TEST_DATABASE must be uppercase -- see the moduledoc)
 ```
 
 This project's own development environment (the sandbox this was
