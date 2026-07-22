@@ -89,6 +89,77 @@ defmodule EctoFdbRelational.Types do
   end
 
   @doc """
+  Renders an Elixir value as a literal FRL SQL fragment (e.g. `42`,
+  `'Alice'`, `TRUE`, `NULL`) rather than a bound `?` parameter.
+
+  Used for `UPDATE`/`DELETE` statements: fdb-relational-server 4.3.6.0's
+  query planner (`RelOpValue.encapsulate`, in fdb-record-layer-core) has a
+  confirmed bug -- reproduced with a minimal, no-gRPC Java program calling
+  FRL directly -- where an `UPDATE ... SET x = ? WHERE y = ?` statement
+  (a bound parameter in *both* the SET and WHERE clauses) fails with
+  `unable to encapsulate comparison operation due to type mismatch(es)`,
+  even though the exact same two parameters bind correctly in a `SELECT`.
+
+  This isn't only a workaround for a bug, either: FRL's own documented
+  `UPDATE` grammar
+  (https://foundationdb.github.io/fdb-record-layer/reference/sql_commands/DML/UPDATE.html)
+  defines `SET columnName = literal | identifier` -- a bind parameter was
+  never a documented right-hand side for `SET` at all, and every example
+  in that doc (`SET C = 20`, `SET B = 'zero', C = 0.0`) uses literals.
+  Literal-only SQL text is therefore the *documented* way to use
+  `UPDATE`, not merely a lucky-to-work-around-a-bug fallback, so
+  `EctoFdbRelational.Protocol.handle_execute/4` inlines `:update`/
+  `:delete` parameters as literals via this function instead of binding
+  them.
+
+  String values are escaped by doubling embedded single quotes (the
+  SQL-standard escape), matching the syntax verified against
+  FoundationDB/fdb-record-layer's own yaml-tests elsewhere in this
+  adapter.
+  """
+  @spec encode_literal(term()) :: String.t()
+  def encode_literal(nil), do: "NULL"
+  def encode_literal(true), do: "TRUE"
+  def encode_literal(false), do: "FALSE"
+  def encode_literal(value) when is_integer(value), do: Integer.to_string(value)
+  def encode_literal(value) when is_float(value), do: Float.to_string(value)
+  def encode_literal(%Decimal{} = value), do: Float.to_string(Decimal.to_float(value))
+
+  def encode_literal(value) when is_binary(value) do
+    "'" <> String.replace(value, "'", "''") <> "'"
+  end
+
+  def encode_literal(value) do
+    raise EctoFdbRelational.Error,
+      message:
+        "EctoFdbRelational.Types.encode_literal/1 does not know how to render #{inspect(value)} " <>
+          "as a SQL literal yet (structs/arrays/UUID/vector params are not implemented in v0.1)"
+  end
+
+  @doc """
+  Splits `sql` on its `?` placeholders and re-joins with each
+  corresponding value from `params` rendered as a literal
+  (`encode_literal/1`), in order. See `encode_literal/1`'s moduledoc for
+  why `EctoFdbRelational.Protocol` uses this for `:update` statements
+  instead of binding parameters.
+
+  Safe only when every `?` in `sql` is a placeholder this adapter's own
+  query builder produced (see `EctoFdbRelational.Adapter.Connection`) --
+  user data always arrives via `params`, never embedded in `sql` itself,
+  so there is no `?` in real input to confuse with a placeholder.
+  """
+  @spec inline_literals(String.t(), [term()]) :: String.t()
+  def inline_literals(sql, params) do
+    [first | rest] = String.split(sql, "?")
+
+    rest
+    |> Enum.zip(params)
+    |> Enum.reduce(first, fn {part, param}, acc ->
+      acc <> encode_literal(param) <> part
+    end)
+  end
+
+  @doc """
   Decodes a `Column` message (a result-set cell) back into a plain Elixir
   term. Returns `nil` for both the deprecated `null` variant and the typed
   `nullType` variant.
