@@ -8,6 +8,10 @@ defmodule EctoFdbRelational.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      # Required by GRPC.Stub.connect/2 (grpc >= 0.11) -- it starts each
+      # GRPC.Client.Connection as a child of this supervisor rather than
+      # linking it to the caller.
+      {GRPC.Client.Supervisor, []},
       # Accumulates CREATE TABLE / CREATE INDEX DDL across a migration run,
       # since FRL's schema templates are declared holistically rather than
       # incrementally -- see EctoFdbRelational.SchemaTemplate for why.
