@@ -56,7 +56,8 @@ defmodule EctoFdbRelational.IntegrationTest do
       port: port,
       database: database,
       relational_schema: "PUBLIC",
-      pool_size: 2
+      pool_size: 2,
+      show_sensitive_data_on_connection_error: true
     )
 
     {:ok, _pid} = Repo.start_link()
