@@ -123,14 +123,33 @@ defmodule EctoFdbRelational.Protocol do
     {:ok, query, state}
   end
 
+  # FRL's own JDBC quick-start connects to this exact well-known, always-
+  # existing system database/schema ("jdbc:embed:/__SYS?schema=CATALOG")
+  # to run catalog-level DDL -- CREATE/DROP DATABASE and CREATE/DROP
+  # SCHEMA TEMPLATE. fdb-relational-server rejects *every* StatementRequest
+  # whose `database` field names something that doesn't exist, including
+  # these, even though their SQL text fully qualifies its own target and
+  # doesn't reference the connection's configured database at all. So
+  # EctoFdbRelational.Ddl's bootstrap statements (and this test's) must be
+  # sent against "/__SYS"/"CATALOG" rather than the Repo's configured
+  # (and not-yet-existent) :database/:relational_schema.
+  @catalog_database "/__SYS"
+  @catalog_schema "CATALOG"
+  @catalog_level_ddl ~r/\A\s*(CREATE|DROP)\s+(DATABASE|SCHEMA\s+TEMPLATE)\b/i
+
   @impl true
   def handle_execute(%Query{statement: statement, command: command} = query, params, opts, state) do
     sql = IO.iodata_to_binary(statement)
 
+    {database, schema} =
+      if Regex.match?(@catalog_level_ddl, sql),
+        do: {@catalog_database, @catalog_schema},
+        else: {state.database, state.schema}
+
     request = %StatementRequest{
       sql: sql,
-      database: unless(catalog_level_ddl?(sql), do: state.database),
-      schema: unless(catalog_level_ddl?(sql), do: state.schema),
+      database: database,
+      schema: schema,
       parameters: %Parameters{parameter: Enum.map(params, &encode_parameter/1)}
     }
 
@@ -143,18 +162,6 @@ defmodule EctoFdbRelational.Protocol do
 
     call_and_decode(rpc_fun, state.channel, request, grpc_opts, query, state)
   end
-
-  # EctoFdbRelational.Ddl's bootstrap statements (DROP/CREATE DATABASE,
-  # CREATE/DROP SCHEMA TEMPLATE) fully qualify their own target in the SQL
-  # text and operate above any single database/schema -- unlike this
-  # module's other statement forms, they're one thing FRL's own DDL
-  # dialect issues before the target database necessarily exists yet.
-  # fdb-relational-server rejects *any* StatementRequest whose `database`
-  # field doesn't already exist, even when the SQL itself doesn't
-  # reference that field at all, so these must omit it.
-  @catalog_level_ddl ~r/\A\s*(CREATE|DROP)\s+(DATABASE|SCHEMA\s+TEMPLATE)\b/i
-
-  defp catalog_level_ddl?(sql), do: Regex.match?(@catalog_level_ddl, sql)
 
   defp encode_parameter(value) do
     %Parameter{parameter: Types.encode_param(value)}
