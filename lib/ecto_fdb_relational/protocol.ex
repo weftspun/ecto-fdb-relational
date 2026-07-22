@@ -147,15 +147,23 @@ defmodule EctoFdbRelational.Protocol do
   # `UPDATE ... SET x = ? WHERE y = ?` statement -- a bound parameter in
   # *both* the SET and WHERE clauses -- fails query planning entirely,
   # even though the same two parameters bind correctly in a `SELECT`.
-  # Rather than depend on an upstream fix, :update statements carrying
+  # Rather than depend on an upstream fix, UPDATE statements carrying
   # parameters have them inlined as SQL literals instead of bound, which
   # sidesteps that planner path -- proven reliable throughout this
   # adapter's own DDL/bootstrap statements, which have always been plain
   # literal text.
-  @literal_inlined_commands [:update]
+  #
+  # Detected via the SQL text itself, not `Query.command`: `command`
+  # comes from the `:command` key `Adapter.Connection.prepare_execute/5`
+  # reads out of `opts`, but `ecto_sql`'s own generic
+  # `Ecto.Adapters.SQL.execute/6` (what actually runs for
+  # `Repo.update_all/2`, same as `Repo.all/2`) never sets that key --
+  # every Ecto.Query-driven call, `update_all` included, arrives here
+  # with `command: :select` regardless of what the SQL text says.
+  @update_statement ~r/\AUPDATE\s/i
 
   @impl true
-  def handle_execute(%Query{statement: statement, command: command} = query, params, opts, state) do
+  def handle_execute(%Query{statement: statement} = query, params, opts, state) do
     sql = IO.iodata_to_binary(statement)
 
     {database, schema} =
@@ -164,7 +172,7 @@ defmodule EctoFdbRelational.Protocol do
         else: {state.database, state.schema}
 
     {sql, params} =
-      if command in @literal_inlined_commands and params != [],
+      if Regex.match?(@update_statement, sql) and params != [],
         do: {Types.inline_literals(sql, params), []},
         else: {sql, params}
 
@@ -177,21 +185,18 @@ defmodule EctoFdbRelational.Protocol do
 
     grpc_opts = grpc_call_opts(opts)
 
-    # fdb-relational-server's `update` RPC handler drops parameters
-    # entirely (it calls FRL.update(database, schema, sql) -- no
-    # parameters argument exists on that method), executing the raw SQL
-    # text with its "?" placeholders unbound. Only `execute` forwards
-    # StatementRequest.parameters through to a real PreparedStatement
-    # (FRL.execute(..., parameters, ...)), and it handles mutations fine
-    # too -- FRL.execute returns either a ResultSet or an update count
-    # depending on the statement. So any statement carrying parameters
-    # must go through `execute`, regardless of :select vs :insert/etc.
-    rpc_fun =
-      if command in [:select, :explain] or params != [],
-        do: &JDBCService.Stub.execute/3,
-        else: &JDBCService.Stub.update/3
-
-    call_and_decode(rpc_fun, state.channel, request, grpc_opts, query, state)
+    # Always the `execute` RPC, never `update`: fdb-relational-server's
+    # `update` RPC handler drops parameters entirely (it calls
+    # FRL.update(database, schema, sql) -- no parameters argument exists
+    # on that method), executing the raw SQL text with its "?"
+    # placeholders unbound. `execute` forwards StatementRequest.parameters
+    # through to a real PreparedStatement (FRL.execute(..., parameters,
+    # ...)) when present, and handles plain non-parameterized statements
+    # (DDL, literal-inlined UPDATEs) via the same createStatement() path
+    # `update` would have -- FRL.execute returns either a ResultSet or an
+    # update count depending on what the SQL actually is, either way. So
+    # there's no statement shape that actually needs the `update` RPC.
+    call_and_decode(&JDBCService.Stub.execute/3, state.channel, request, grpc_opts, query, state)
   end
 
   defp encode_parameter(value) do
