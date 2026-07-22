@@ -66,7 +66,19 @@ defmodule EctoFdbRelational.IntegrationTest do
     # yaml-tests (create-drop.yamsql / SQL_Getting_Started.md), issued
     # directly rather than through mix ecto.migrate so this test doesn't
     # also depend on the migration accumulator's global state.
-    Repo.query!("DROP DATABASE IF EXISTS #{database}", [], command: :update)
+    #
+    # First real run against a live server (in CI) showed that despite the
+    # "IF EXISTS" clause, fdb-relational-server still returns gRPC status 2
+    # ("Database ... does not exist") rather than treating this as a no-op
+    # on a genuinely fresh cluster/database -- catch exactly that case.
+    try do
+      Repo.query!("DROP DATABASE IF EXISTS #{database}", [], command: :update)
+    rescue
+      e in EctoFdbRelational.Error ->
+        unless e.grpc_status == 2 and e.message =~ "does not exist" do
+          reraise e, __STACKTRACE__
+        end
+    end
 
     Repo.query!(
       "CREATE SCHEMA TEMPLATE ecto_fdb_relational_it " <>
