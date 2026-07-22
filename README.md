@@ -9,9 +9,10 @@ served by `fdb-relational-server` and spoken to here over gRPC directly
 > **Status: v0.1, pre-1.0.** This adapter implements enough of Ecto's query
 > API and migrations for basic CRUD, and is honest in code and here about
 > exactly what it does and doesn't do yet. Read "Known gaps" below before
-> using this for anything real. It has **not** been run against a live
-> FoundationDB cluster in the environment this was built in (no Java
-> available) -- see "Running the integration tests".
+> using this for anything real. It was **not** run against a live
+> FoundationDB cluster in the sandbox this was originally built in (no
+> Java available); CI's `integration` job now does that on every push/PR
+> -- see "Running the integration tests".
 
 ## What FRL is
 
@@ -93,9 +94,19 @@ end
 config :my_app, MyApp.Repo,
   hostname: "localhost",
   port: 8123,                    # the -g gRPC port fdb-relational-server was started with
-  database: "/frl/my_app",
+  database: "/FRL/MY_APP",       # must be UPPERCASE -- see the note below
   relational_schema: "PUBLIC"    # optional, defaults to "PUBLIC"
 ```
+
+**`:database` must be uppercase.** FRL case-folds unquoted SQL
+identifiers in DDL text (`CREATE DATABASE /frl/my_app` is stored as
+`/FRL/MY_APP`) but uses the `database`/`schema` fields on regular
+statement requests literally, uncased. A lowercase `:database` config
+value creates a database via DDL that every later query then can't find,
+surfacing as `fdb-relational-server returned gRPC status 2: Database
+<path> does not exist` for statements against a database that
+demonstrably exists -- confirmed against a real server while building
+this adapter's CI (see `ADR.md`).
 
 Standing up the server this config talks to (verified working, Maven
 Central artifacts, no source build needed):
@@ -198,25 +209,28 @@ anything) unless you point it at one:
 
 ```sh
 FRL_TEST_PORT=8123 mix test test/ecto_fdb_relational/integration_test.exs
-# optional: FRL_TEST_HOST=localhost FRL_TEST_DATABASE=/frl/ecto_fdb_relational_test
+# optional: FRL_TEST_HOST=localhost FRL_TEST_DATABASE=/FRL/ECTO_FDB_RELATIONAL_TEST
+# (FRL_TEST_DATABASE must be uppercase -- see the moduledoc)
 ```
 
-This project's own development/CI environment did **not** have a live
-FoundationDB cluster + `fdb-relational-server` available (no Java runtime
-in the sandbox this was built in), so **this integration suite has not
-actually been run against a live server as part of building this
-adapter**. That is stated plainly rather than claimed otherwise. What
-*has* been run and passes:
+This project's own development environment (the sandbox this was
+originally built in) did **not** have a live FoundationDB cluster +
+`fdb-relational-server` available (no Java runtime), so the integration
+suite was not run against a live server as part of *building* this
+adapter. That gap is now closed in CI: the `integration` job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) installs a real
+single-node FoundationDB 7.1.26 cluster (the `foundationdb-server`
+Debian package, which auto-configures itself), downloads the same
+`fdb-relational-server-4.3.6.0-all.jar` referenced above from Maven
+Central, starts it against that cluster, and runs
+`test/ecto_fdb_relational/integration_test.exs` for real -- on every push
+and pull request, not just `test/ecto_fdb_relational/adapter/connection_test.exs`
+(the SQL-builder unit tests, which need no live server and always ran).
 
-```sh
-mix test   # test/ecto_fdb_relational/adapter/connection_test.exs --
-           # unit tests of the SQL builder via Ecto.Query.Planner,
-           # no live server needed
-```
-
-If you do run the integration suite against a real server and hit
-something that contradicts a claim in this README or `ADR.md`, that's a
-real bug/documentation error -- please open an issue with what you saw.
+If that job goes red, or you run the integration suite locally against a
+real server and hit something that contradicts a claim in this README or
+`ADR.md`, that's a real bug/documentation error -- please open an issue
+with what you saw.
 
 ## Development
 

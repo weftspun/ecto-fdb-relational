@@ -11,14 +11,21 @@ defmodule EctoFdbRelational.IntegrationTest do
       FRL_TEST_PORT=8123 mix test test/ecto_fdb_relational/integration_test.exs
 
   Optional: `FRL_TEST_HOST` (default `localhost`),
-  `FRL_TEST_DATABASE` (default `/frl/ecto_fdb_relational_test`).
+  `FRL_TEST_DATABASE` (default `/FRL/ECTO_FDB_RELATIONAL_TEST` -- **must
+  be uppercase**: FRL case-folds unquoted SQL identifiers in DDL text to
+  uppercase, but the `database`/`schema` fields on plain statement
+  requests are used literally, uncased; a lowercase path here creates a
+  database via DDL that a later statement using the same lowercase
+  string then can't find, surfacing as a spurious "Database ... does not
+  exist").
 
   See the README's "Running the integration tests" section for how to
   stand up `fdb-relational-server` (Maven Central artifacts, verified
   working this session -- no source build needed) plus a real FDB cluster.
-  This repo's own CI does **not** have a live FoundationDB cluster
-  available, so this suite does not run there either; see the README for
-  exactly what that means for the honesty of this project's test coverage.
+  The `integration` job in `.github/workflows/ci.yml` stands up exactly
+  this (a real single-node FoundationDB cluster + a real
+  `fdb-relational-server` process) and runs this suite against it on every
+  push/PR -- see the README for details.
   """
   use ExUnit.Case, async: false
 
@@ -48,7 +55,7 @@ defmodule EctoFdbRelational.IntegrationTest do
   setup_all do
     port = String.to_integer(System.get_env("FRL_TEST_PORT", "0"))
     host = System.get_env("FRL_TEST_HOST", "localhost")
-    database = System.get_env("FRL_TEST_DATABASE", "/frl/ecto_fdb_relational_test")
+    database = System.get_env("FRL_TEST_DATABASE", "/FRL/ECTO_FDB_RELATIONAL_TEST")
 
     Application.put_env(:ecto_fdb_relational, Repo,
       hostname: host,

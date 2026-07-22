@@ -66,26 +66,25 @@ defmodule EctoFdbRelational.Protocol do
               "EctoFdbRelational requires :database (e.g. \"/frl/my_app\") in the Repo config"
 
     relational_schema = Keyword.get(opts, :relational_schema, @default_schema)
-    address = "#{hostname}:#{port}"
 
-    case GRPC.Stub.connect(address, connect_opts(opts)) do
-      {:ok, channel} ->
-        # See EctoFdbRelational.Ddl moduledoc: execute_ddl/1 has no access to
-        # repo config, so we stash the target database/schema here, the
-        # first point at which we definitely have it and definitely run
-        # before any migration can execute.
-        EctoFdbRelational.Ddl.put_ddl_context(database, relational_schema)
+    with {:ok, ip} <- :inet.getaddr(String.to_charlist(hostname), :inet),
+         address = "#{:inet.ntoa(ip)}:#{port}",
+         {:ok, channel} <- GRPC.Stub.connect(address, connect_opts(opts)) do
+      # See EctoFdbRelational.Ddl moduledoc: execute_ddl/1 has no access to
+      # repo config, so we stash the target database/schema here, the
+      # first point at which we definitely have it and definitely run
+      # before any migration can execute.
+      EctoFdbRelational.Ddl.put_ddl_context(database, relational_schema)
 
-        {:ok,
-         %__MODULE__{
-           channel: channel,
-           database: database,
-           schema: relational_schema,
-           address: address
-         }}
-
-      {:error, reason} ->
-        {:error, Error.from_reason(reason)}
+      {:ok,
+       %__MODULE__{
+         channel: channel,
+         database: database,
+         schema: relational_schema,
+         address: address
+       }}
+    else
+      {:error, reason} -> {:error, Error.from_reason(reason)}
     end
   end
 
@@ -124,27 +123,91 @@ defmodule EctoFdbRelational.Protocol do
     {:ok, query, state}
   end
 
+  # FRL's own JDBC quick-start runs *every* catalog-level DDL statement --
+  # CREATE/DROP DATABASE, CREATE/DROP SCHEMA TEMPLATE, and even
+  # "CREATE SCHEMA /path/name WITH TEMPLATE ..." itself (which names a
+  # database that was only just created earlier in the same bootstrap
+  # sequence) -- over one connection to this exact well-known, always-
+  # existing system database/schema ("jdbc:embed:/__SYS?schema=CATALOG").
+  # fdb-relational-server rejects *every* StatementRequest whose `database`
+  # field names something that doesn't exist -- including a database that
+  # was just created in a prior statement on the same connection, which
+  # rules out simply passing the real target once it should exist -- so
+  # EctoFdbRelational.Ddl's bootstrap statements (and this test's) must all
+  # be sent against "/__SYS"/"CATALOG" rather than the Repo's configured
+  # :database/:relational_schema. Only regular DML against an already-
+  # provisioned schema uses the Repo's configured database/schema.
+  @catalog_database "/__SYS"
+  @catalog_schema "CATALOG"
+  @catalog_level_ddl ~r/\A\s*(CREATE|DROP)\s+(DATABASE|SCHEMA)\b/i
+
+  # fdb-relational-server 4.3.6.0's query planner has a confirmed bug
+  # (reproduced with a minimal, no-gRPC Java program calling FRL
+  # directly -- see Types.encode_literal/1's moduledoc) where an
+  # `UPDATE ... SET x = ? WHERE y = ?` statement -- a bound parameter in
+  # *both* the SET and WHERE clauses -- fails query planning entirely,
+  # even though the same two parameters bind correctly in a `SELECT`.
+  # Rather than depend on an upstream fix, UPDATE statements carrying
+  # parameters have them inlined as SQL literals instead of bound, which
+  # sidesteps that planner path -- proven reliable throughout this
+  # adapter's own DDL/bootstrap statements, which have always been plain
+  # literal text.
+  #
+  # Detected via the SQL text itself, not `Query.command`: `command`
+  # comes from the `:command` key `Adapter.Connection.prepare_execute/5`
+  # reads out of `opts`, but `ecto_sql`'s own generic
+  # `Ecto.Adapters.SQL.execute/6` (what actually runs for
+  # `Repo.update_all/2`, same as `Repo.all/2`) never sets that key --
+  # every Ecto.Query-driven call, `update_all` included, arrives here
+  # with `command: :select` regardless of what the SQL text says.
+  @update_statement ~r/\AUPDATE\s/i
+
   @impl true
-  def handle_execute(%Query{statement: statement, command: command} = query, params, opts, state) do
+  def handle_execute(%Query{statement: statement} = query, params, opts, state) do
+    sql = IO.iodata_to_binary(statement)
+
+    {database, schema} =
+      if Regex.match?(@catalog_level_ddl, sql),
+        do: {@catalog_database, @catalog_schema},
+        else: {state.database, state.schema}
+
+    {sql, params} =
+      if Regex.match?(@update_statement, sql) and params != [],
+        do: {Types.inline_literals(sql, params), []},
+        else: {sql, params}
+
     request = %StatementRequest{
-      sql: IO.iodata_to_binary(statement),
-      database: state.database,
-      schema: state.schema,
+      sql: sql,
+      database: database,
+      schema: schema,
       parameters: %Parameters{parameter: Enum.map(params, &encode_parameter/1)}
     }
 
     grpc_opts = grpc_call_opts(opts)
 
-    rpc_fun =
-      if command in [:select, :explain],
-        do: &JDBCService.Stub.execute/3,
-        else: &JDBCService.Stub.update/3
-
-    call_and_decode(rpc_fun, state.channel, request, grpc_opts, query, state)
+    # Always the `execute` RPC, never `update`: fdb-relational-server's
+    # `update` RPC handler drops parameters entirely (it calls
+    # FRL.update(database, schema, sql) -- no parameters argument exists
+    # on that method), executing the raw SQL text with its "?"
+    # placeholders unbound. `execute` forwards StatementRequest.parameters
+    # through to a real PreparedStatement (FRL.execute(..., parameters,
+    # ...)) when present, and handles plain non-parameterized statements
+    # (DDL, literal-inlined UPDATEs) via the same createStatement() path
+    # `update` would have -- FRL.execute returns either a ResultSet or an
+    # update count depending on what the SQL actually is, either way. So
+    # there's no statement shape that actually needs the `update` RPC.
+    call_and_decode(&JDBCService.Stub.execute/3, state.channel, request, grpc_opts, query, state)
   end
 
   defp encode_parameter(value) do
-    %Parameter{parameter: Types.encode_param(value)}
+    # java_sql_types_code is what fdb-relational-server actually switches
+    # on to bind this parameter server-side (see Types.java_sql_type_code/1
+    # moduledoc) -- without it every parameterized statement silently
+    # binds nothing.
+    %Parameter{
+      parameter: Types.encode_param(value),
+      java_sql_types_code: Types.java_sql_type_code(value)
+    }
   end
 
   defp grpc_call_opts(opts) do
