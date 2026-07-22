@@ -54,6 +54,40 @@ defmodule EctoFdbRelational.Types do
           "as a Column proto message yet (structs/arrays/UUID/vector params are not implemented in v0.1)"
   end
 
+  # java.sql.Types constants. FRL's own server-side parameter binding
+  # (fdb-relational-server's FRL.addPreparedStatementParameter) switches
+  # on Parameter.java_sql_types_code to decide which RelationalPreparedStatement
+  # setter to call -- despite that field being marked `[deprecated = true]`
+  # in jdbc.proto, it is the one thing that actually drives binding. A
+  # Parameter with only `parameter` (the Column) set and no
+  # java_sql_types_code silently binds nothing: the switch falls through
+  # with no matching case, leaving that placeholder unbound. Every
+  # parameter this adapter sends must carry the matching code.
+  @sql_type_null 0
+  @sql_type_bigint -5
+  @sql_type_double 8
+  @sql_type_varchar 12
+  @sql_type_boolean 16
+
+  @doc """
+  The `java.sql.Types` constant matching `encode_param/1`'s choice of
+  `Column` variant for `value`, for `Parameter.java_sql_types_code`.
+  """
+  @spec java_sql_type_code(term()) :: integer()
+  def java_sql_type_code(nil), do: @sql_type_null
+  def java_sql_type_code(value) when is_boolean(value), do: @sql_type_boolean
+  def java_sql_type_code(value) when is_integer(value), do: @sql_type_bigint
+  def java_sql_type_code(value) when is_float(value), do: @sql_type_double
+  def java_sql_type_code(%Decimal{}), do: @sql_type_double
+  def java_sql_type_code(value) when is_binary(value), do: @sql_type_varchar
+
+  def java_sql_type_code(value) do
+    raise EctoFdbRelational.Error,
+      message:
+        "EctoFdbRelational.Types.java_sql_type_code/1 does not know how to encode " <>
+          "#{inspect(value)} yet (structs/arrays/UUID/vector params are not implemented in v0.1)"
+  end
+
   @doc """
   Decodes a `Column` message (a result-set cell) back into a plain Elixir
   term. Returns `nil` for both the deprecated `null` variant and the typed
