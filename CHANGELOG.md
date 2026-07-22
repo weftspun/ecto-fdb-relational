@@ -1,5 +1,28 @@
 # Changelog
 
+## v0.2.0
+
+Replaces the gRPC transport outright with an embedded-JVM one (see ADR 0003):
+
+* `EctoFdbRelational.Native`: a Rustler NIF (`native/ecto_fdb_relational_nif`)
+  embedding a JVM via `jni`'s invocation API, calling
+  `com.apple.foundationdb.relational.server.FRL` directly through
+  `native/frl_bridge`'s one Java class. No separately-managed
+  `fdb-relational-server` process, no gRPC, anywhere.
+* The wire *shape* is unchanged: `EctoFdbRelational.Native` carries the same
+  `grpc.relational.jdbc.v1.{StatementRequest,StatementResponse}` protobuf
+  bytes the old gRPC transport did, just over JNI instead of gRPC/HTTP2 --
+  `EctoFdbRelational.Types`/`Query`/DDL-catalog-routing logic is unchanged.
+  `lib/ecto_fdb_relational/grpc/` moved to `lib/ecto_fdb_relational/proto/`
+  with the generated `GRPC.Service`/`GRPC.Stub` code removed (plain protobuf
+  message codecs only).
+* `Repo` config changed from `hostname`/`port` (the gRPC address) to
+  `cluster_file` (the FoundationDB cluster file path).
+* The `{:grpc}` dependency is gone; `{:rustler}` was added. Building this
+  adapter now requires a JDK and a Rust toolchain -- see the README.
+* `spike/jvm_embed` (ADR 0002's de-risking spike) is removed; it served its
+  purpose and `native/frl_bridge` is its real, non-throwaway successor.
+
 ## v0.1.0
 
 Initial release.

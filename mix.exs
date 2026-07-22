@@ -1,7 +1,7 @@
 defmodule EctoFdbRelational.MixProject do
   use Mix.Project
 
-  @version "0.1.0"
+  @version "0.2.0"
   @source_url "https://github.com/weftspun/ecto_fdb_relational"
 
   def project do
@@ -55,10 +55,18 @@ defmodule EctoFdbRelational.MixProject do
       {:ecto_sql, "~> 3.11"},
       {:db_connection, "~> 2.6"},
 
-      # gRPC transport straight to fdb-relational-server's JDBCService, per the ADR in the
-      # README: no JDBC, no embedded JVM, no Rust NIF.
-      {:grpc, "~> 0.9"},
+      # Wire codec only (no gRPC service/stub code -- see
+      # lib/ecto_fdb_relational/proto/jdbc.pb.ex): FRL's own
+      # grpc.relational.jdbc.v1.{StatementRequest,StatementResponse,...} messages, now
+      # carried over JNI instead of gRPC/HTTP2. See ADR 0003.
       {:protobuf, "~> 0.13"},
+
+      # Embeds FRL in-process via a Rustler NIF + JNI -- see ADR 0003 and
+      # EctoFdbRelational.Native. Needs a Rust toolchain (to build native/
+      # ecto_fdb_relational_nif) and a JDK (both to link against libjvm and, via
+      # :frl_bridge above, to compile native/frl_bridge) wherever this is *compiled* --
+      # see the README.
+      {:rustler, "~> 0.38"},
 
       # Dev/test/docs tooling only.
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
@@ -70,13 +78,15 @@ defmodule EctoFdbRelational.MixProject do
 
   defp description do
     "An Ecto adapter for FoundationDB Record Layer's Relational Layer (FRL), " <>
-      "talking gRPC directly to fdb-relational-server's JDBCService (no JDBC/JVM bridge)."
+      "embedding FRL in-process via a Rustler NIF + JNI (no separate fdb-relational-server " <>
+      "process, no gRPC)."
   end
 
   defp package do
     [
       name: "ecto_fdb_relational",
-      files: ~w(lib priv/protos .formatter.exs mix.exs README.md CHANGELOG.md LICENSE ADR.md),
+      files:
+        ~w(lib priv/protos native .formatter.exs mix.exs README.md CHANGELOG.md LICENSE ADR.md),
       licenses: ["Apache-2.0"],
       links: %{
         "GitHub" => @source_url,

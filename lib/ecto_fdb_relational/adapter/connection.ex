@@ -304,11 +304,24 @@ defmodule EctoFdbRelational.Adapter.Connection do
 
   defp expr({:^, _, [_index]}, _sources, _query), do: "?"
 
+  # fdb-relational-server 4.3.6.0's SQL parser has a confirmed bug --
+  # reproduced directly against a live server, no gRPC/Ecto involved --
+  # where *any* parenthesized boolean expression in a WHERE clause fails
+  # with "expected BooleanValue but got RecordConstructorValue": it parses
+  # `(x = ?)` as a row-value constructor, not a grouped predicate, even
+  # for a single condition with no AND/OR inside. `WHERE x = ? AND y = ?`
+  # (no parens) binds and executes fine; `WHERE (x = ? AND y = ?)` (same
+  # two conditions, parens added) fails identically. So AND/OR render flat,
+  # without grouping parens, relying on SQL's standard AND-before-OR
+  # precedence for correctness -- which happens to match every WHERE
+  # clause this adapter can currently build, since nothing here produces
+  # mixed AND/OR (see the "single-table select/where" scope note above)
+  # where that precedence would matter.
   defp expr({:and, _, [left, right]}, sources, query),
-    do: ["(", expr(left, sources, query), " AND ", expr(right, sources, query), ")"]
+    do: [expr(left, sources, query), " AND ", expr(right, sources, query)]
 
   defp expr({:or, _, [left, right]}, sources, query),
-    do: ["(", expr(left, sources, query), " OR ", expr(right, sources, query), ")"]
+    do: [expr(left, sources, query), " OR ", expr(right, sources, query)]
 
   defp expr({:not, _, [{:is_nil, _, [field]}]}, sources, query),
     do: [expr(field, sources, query), " IS NOT NULL"]

@@ -6,13 +6,16 @@ on:
   pull_request:
   merge_group:
 
+env:
+  FRS_VERSION: "4.3.6.0" # org.foundationdb:fdb-relational-server on Maven Central
+
 jobs:
   test:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        elixir: ["1.17", "1.18"]
-        otp: ["26", "27"]
+        elixir: ["1.20"]
+        otp: ["29"]
     steps:
       - uses: actions/checkout@v4
 
@@ -21,7 +24,14 @@ jobs:
           elixir-version: ${{ matrix.elixir }}
           otp-version: ${{ matrix.otp }}
 
-      - name: Restore deps cache
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore deps/build cache
         uses: actions/cache@v4
         with:
           path: |
@@ -29,41 +39,69 @@ jobs:
             _build
           key: ${{ runner.os }}-mix-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mix.lock') }}
 
+      - name: Restore Rust NIF build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            native/ecto_fdb_relational_nif/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('native/ecto_fdb_relational_nif/Cargo.lock') }}
+
+      # native/ecto_fdb_relational_nif (a Rustler NIF that embeds a JVM -- see ADR 0003)
+      # links against libjvm at compile time, and native/frl_bridge (the one Java class it
+      # calls into) is compiled against the FRL jars, as ordinary parts of `mix compile`
+      # now -- neither needs a live FoundationDB cluster, just the jar and a JDK/Rust
+      # toolchain on the compiling machine.
+      - name: Download fdb-relational-server ${{ env.FRS_VERSION }} (compile-time classpath only)
+        run: |
+          curl -fsSL -o /tmp/fdb-relational-server.jar \
+            "https://repo1.maven.org/maven2/org/foundationdb/fdb-relational-server/${FRS_VERSION}/fdb-relational-server-${FRS_VERSION}-all.jar"
+          echo "ECTO_FDB_RELATIONAL_CLASSPATH=/tmp/fdb-relational-server.jar" >> "$GITHUB_ENV"
+
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
       - run: mix test
         # test/ecto_fdb_relational/integration_test.exs skips itself here (no
-        # FRL_TEST_PORT) -- it runs for real in the `integration` job below.
+        # FRL_TEST_CLUSTER_FILE) -- it runs for real in the `integration` job below.
 
   integration:
-    name: Integration (real fdb-relational-server + FoundationDB)
+    name: Integration (real FoundationDB, FRL embedded in-process)
     runs-on: ubuntu-latest
     timeout-minutes: 15
     env:
       FDB_VERSION: "7.1.26" # matches the fdb client fdb-record-layer 4.3.6.0 pins
-      FRS_VERSION: "4.3.6.0" # org.foundationdb:fdb-relational-server on Maven Central
       FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
     steps:
       - uses: actions/checkout@v4
 
       - uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.18"
-          otp-version: "27"
+          elixir-version: "1.20"
+          otp-version: "29"
 
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: "21"
 
-      - name: Restore deps cache
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Restore deps/build cache
         uses: actions/cache@v4
         with:
           path: |
             deps
             _build
           key: ${{ runner.os }}-mix-1.18-27-${{ hashFiles('mix.lock') }}
+
+      - name: Restore Rust NIF build cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            native/ecto_fdb_relational_nif/target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('native/ecto_fdb_relational_nif/Cargo.lock') }}
 
       - name: Install FoundationDB ${{ env.FDB_VERSION }} (single-node, auto-configured)
         run: |
@@ -80,32 +118,15 @@ jobs:
           done
           fdbcli --exec status
 
-      - name: Download fdb-relational-server ${{ env.FRS_VERSION }}
+      - name: Download fdb-relational-server ${{ env.FRS_VERSION }} (classpath for the embedded transport)
         run: |
           curl -fsSL -o /tmp/fdb-relational-server.jar \
             "https://repo1.maven.org/maven2/org/foundationdb/fdb-relational-server/${FRS_VERSION}/fdb-relational-server-${FRS_VERSION}-all.jar"
-
-      - name: Start fdb-relational-server
-        run: |
-          nohup java -cp /tmp/fdb-relational-server.jar \
-            com.apple.foundationdb.relational.server.RelationalServer -g 8123 -p 8124 \
-            > /tmp/relational-server.log 2>&1 &
-          for i in $(seq 1 30); do
-            (exec 3<>/dev/tcp/127.0.0.1/8123) 2>/dev/null && exec 3<&- && break
-            sleep 2
-          done
+          echo "ECTO_FDB_RELATIONAL_CLASSPATH=/tmp/fdb-relational-server.jar" >> "$GITHUB_ENV"
 
       - run: mix deps.get
 
-      - name: Run integration tests against the real server
+      - name: Run integration tests against a real FoundationDB cluster (no separate server process)
         env:
-          FRL_TEST_PORT: "8123"
+          FRL_TEST_CLUSTER_FILE: ${{ env.FDB_CLUSTER_FILE }}
         run: mix test test/ecto_fdb_relational/integration_test.exs
-
-      - name: Upload fdb-relational-server log
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: fdb-relational-server-log
-          path: /tmp/relational-server.log
-          if-no-files-found: ignore
