@@ -141,6 +141,19 @@ defmodule EctoFdbRelational.Protocol do
   @catalog_schema "CATALOG"
   @catalog_level_ddl ~r/\A\s*(CREATE|DROP)\s+(DATABASE|SCHEMA)\b/i
 
+  # fdb-relational-server 4.3.6.0's query planner has a confirmed bug
+  # (reproduced with a minimal, no-gRPC Java program calling FRL
+  # directly -- see Types.encode_literal/1's moduledoc) where an
+  # `UPDATE ... SET x = ? WHERE y = ?` statement -- a bound parameter in
+  # *both* the SET and WHERE clauses -- fails query planning entirely,
+  # even though the same two parameters bind correctly in a `SELECT`.
+  # Rather than depend on an upstream fix, :update statements carrying
+  # parameters have them inlined as SQL literals instead of bound, which
+  # sidesteps that planner path -- proven reliable throughout this
+  # adapter's own DDL/bootstrap statements, which have always been plain
+  # literal text.
+  @literal_inlined_commands [:update]
+
   @impl true
   def handle_execute(%Query{statement: statement, command: command} = query, params, opts, state) do
     sql = IO.iodata_to_binary(statement)
@@ -149,6 +162,11 @@ defmodule EctoFdbRelational.Protocol do
       if Regex.match?(@catalog_level_ddl, sql),
         do: {@catalog_database, @catalog_schema},
         else: {state.database, state.schema}
+
+    {sql, params} =
+      if command in @literal_inlined_commands and params != [],
+        do: {Types.inline_literals(sql, params), []},
+        else: {sql, params}
 
     request = %StatementRequest{
       sql: sql,
