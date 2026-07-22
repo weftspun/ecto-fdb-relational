@@ -56,7 +56,37 @@ defmodule EctoFdbRelational.Adapter.ConnectionTest do
         select: p.id
       )
 
-    assert sql(query) == "SELECT id FROM posts WHERE (published = true AND title IS NULL)"
+    assert sql(query) == "SELECT id FROM posts WHERE published = true AND title IS NULL"
+  end
+
+  test "all/1 renders `a and b or c` without grouping parens, AND still binding tighter" do
+    # Elixir's own `and`/`or` precedence (`and` binds tighter, matching
+    # standard SQL) puts this source expression's implicit grouping at
+    # {:or, [{:and, [a, b]}, c]} -- see EctoFdbRelational.Adapter.Connection's
+    # expr/3 moduledoc comment on :and/:or for why no grouping parens are
+    # emitted (fdb-relational-server rejects them entirely). Rendering flat
+    # relies on FRL's own SQL parser applying the same AND-before-OR
+    # precedence Elixir already used to build this AST, so the meaning
+    # survives the round trip through unparenthesized text.
+    query =
+      from(p in Post,
+        where: p.published == true and p.views > ^10 or is_nil(p.title),
+        select: p.id
+      )
+
+    assert sql(query) ==
+             "SELECT id FROM posts WHERE published = true AND views > ? OR title IS NULL"
+  end
+
+  test "all/1 renders `a or b and c` without grouping parens, AND still binding tighter" do
+    query =
+      from(p in Post,
+        where: p.published == true or p.views > ^10 and is_nil(p.title),
+        select: p.id
+      )
+
+    assert sql(query) ==
+             "SELECT id FROM posts WHERE published = true OR views > ? AND title IS NULL"
   end
 
   test "all/1 renders in/2 with a literal list" do
