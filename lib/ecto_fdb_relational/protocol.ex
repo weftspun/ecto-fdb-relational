@@ -177,7 +177,14 @@ defmodule EctoFdbRelational.Protocol do
   end
 
   defp encode_parameter(value) do
-    %Parameter{parameter: Types.encode_param(value)}
+    # java_sql_types_code is what fdb-relational-server actually switches
+    # on to bind this parameter server-side (see Types.java_sql_type_code/1
+    # moduledoc) -- without it every parameterized statement silently
+    # binds nothing.
+    %Parameter{
+      parameter: Types.encode_param(value),
+      java_sql_types_code: Types.java_sql_type_code(value)
+    }
   end
 
   defp grpc_call_opts(opts) do
