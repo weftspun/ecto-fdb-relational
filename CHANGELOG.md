@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.3.0
+
+Real `Repo.transaction/2` support -- multiple statements now batch into one FDB
+transaction/commit instead of autocommitting each individually (measured ~3x faster
+for a bulk-write workload; FDB's own per-statement commit latency dominates this
+transport's total cost, far more than the JNI/Rust/Elixir plumbing around it -- see
+`EctoFdbRelational.Protocol`'s "Transactions" moduledoc section):
+
+* `EctoFdbRelational.Native.begin/3`, `execute_in_transaction/2`, `commit/1` and
+  `rollback/1`: a real, autocommit-disabled `RelationalConnection` (the same JDBC
+  interface behind FRL's documented `jdbc:embed:` driver), opened via `FRL`'s own
+  internal `RelationalDriver` rather than its always-autocommit `FRL.execute`
+  convenience wrapper.
+* `native/frl_bridge/Bridge.java` builds `StatementResponse`/`ResultSet` protobuf
+  messages itself for the in-transaction path (`FRL.execute`'s own marshalling isn't
+  reusable outside its own per-call connection lifecycle) -- covers the same v0.1
+  scalar scope `EctoFdbRelational.Types` already documents (long/string/boolean/
+  double/binary/null), verified byte-for-byte against `FRL.execute`'s own output
+  through the real `Types.decode_column/1` decoder.
+* Both reads and writes work inside a transaction (read-your-writes on uncommitted
+  data, real isolation from other connections until commit, full rollback). Catalog-
+  level DDL (`CREATE`/`DROP DATABASE`/`SCHEMA`/`SCHEMA TEMPLATE`) is **not** supported
+  inside a transaction -- raises a clear error rather than silently running against
+  the wrong database/schema; not a real-world gap since `supports_ddl_transaction?/0`
+  is already `false` and migrations never run inside `Repo.transaction/2` here anyway.
+
 ## v0.2.0
 
 Replaces the gRPC transport outright with an embedded-JVM one (see ADR 0003):

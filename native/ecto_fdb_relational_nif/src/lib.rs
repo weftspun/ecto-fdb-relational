@@ -45,6 +45,17 @@ struct FrlConnection {
 
 impl rustler::Resource for FrlConnection {}
 
+struct FrlTransaction {
+    // A GlobalRef to the Java `RelationalConnection` `bridge.Bridge.beginTransaction/3`
+    // returned -- a real, autocommit-disabled JDBC connection (see that method's doc),
+    // not the `FRL` instance `FrlConnection` above wraps. None after commit/rollback;
+    // every other call takes the lock and bails out with a clear error instead of
+    // touching an already-finished transaction.
+    conn: Mutex<Option<jni::objects::GlobalRef>>,
+}
+
+impl rustler::Resource for FrlTransaction {}
+
 fn err_term(msg: String) -> RustlerError {
     RustlerError::Term(Box::new(msg))
 }
@@ -184,6 +195,152 @@ fn execute<'a>(
     Ok(owned.release(env))
 }
 
+/// Opens a real, explicit (autocommit-disabled) transaction against `database`/`schema`
+/// -- see `bridge.Bridge.beginTransaction`'s doc. Every subsequent `execute_in_transaction`
+/// call against the returned resource runs on this same FDB transaction, batched into one
+/// commit instead of one per statement (see `EctoFdbRelational.Protocol`'s "Transactions"
+/// moduledoc section for the measured win).
+#[rustler::nif(schedule = "DirtyIo")]
+fn begin(
+    conn: ResourceArc<FrlConnection>,
+    database: String,
+    schema: String,
+) -> Result<ResourceArc<FrlTransaction>, RustlerError> {
+    let vm = jvm().map_err(err_term)?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| err_term(format!("attaching to the JVM failed: {e}")))?;
+
+    let guard = conn.frl.lock().unwrap();
+    let frl_ref = guard
+        .as_ref()
+        .ok_or_else(|| err_term("this connection is already closed".to_string()))?;
+
+    let jdatabase = env
+        .new_string(&database)
+        .map_err(|e| err_term(format!("building the database argument failed: {e}")))?;
+    let jschema = env
+        .new_string(&schema)
+        .map_err(|e| err_term(format!("building the schema argument failed: {e}")))?;
+
+    let result = env.call_static_method(
+        "bridge/Bridge",
+        "beginTransaction",
+        "(Ljava/lang/Object;Ljava/lang/String;Ljava/lang/String;)Ljava/lang/Object;",
+        &[
+            JValue::Object(frl_ref.as_obj()),
+            JValue::Object(&jdatabase),
+            JValue::Object(&jschema),
+        ],
+    );
+
+    let obj = match result {
+        Ok(v) => v
+            .l()
+            .map_err(|e| err_term(format!("unexpected beginTransaction/3 return value: {e}")))?,
+        Err(_) => return Err(err_term(describe_pending_exception(&mut env))),
+    };
+
+    let global = env
+        .new_global_ref(obj)
+        .map_err(|e| err_term(format!("holding onto the transaction connection failed: {e}")))?;
+
+    Ok(ResourceArc::new(FrlTransaction {
+        conn: Mutex::new(Some(global)),
+    }))
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn execute_in_transaction<'a>(
+    env: Env<'a>,
+    txn: ResourceArc<FrlTransaction>,
+    request: Binary<'a>,
+) -> Result<Binary<'a>, RustlerError> {
+    let vm = jvm().map_err(err_term)?;
+    let mut jenv = vm
+        .attach_current_thread()
+        .map_err(|e| err_term(format!("attaching to the JVM failed: {e}")))?;
+
+    let guard = txn.conn.lock().unwrap();
+    let conn_ref = guard
+        .as_ref()
+        .ok_or_else(|| err_term("this transaction is already finished".to_string()))?;
+
+    let jrequest = jenv
+        .byte_array_from_slice(request.as_slice())
+        .map_err(|e| err_term(format!("copying the request bytes failed: {e}")))?;
+
+    let result = jenv.call_static_method(
+        "bridge/Bridge",
+        "executeInTransaction",
+        "(Ljava/lang/Object;[B)[B",
+        &[
+            JValue::Object(conn_ref.as_obj()),
+            JValue::Object(&JObject::from(jrequest)),
+        ],
+    );
+
+    let response_obj = match result {
+        Ok(v) => v.l().map_err(|e| {
+            err_term(format!(
+                "unexpected executeInTransaction/2 return value: {e}"
+            ))
+        })?,
+        Err(_) => return Err(err_term(describe_pending_exception(&mut jenv))),
+    };
+
+    let response_bytes = jenv
+        .convert_byte_array(jni::objects::JByteArray::from(response_obj))
+        .map_err(|e| err_term(format!("reading the response bytes failed: {e}")))?;
+
+    let mut owned = OwnedBinary::new(response_bytes.len())
+        .ok_or_else(|| err_term("allocating the response binary failed".to_string()))?;
+    owned.as_mut_slice().copy_from_slice(&response_bytes);
+    Ok(owned.release(env))
+}
+
+// commit/rollback both consume the transaction (closing the underlying connection
+// after either one, via bridge.Bridge.commit/rollback -- see their docs): the `conn`
+// slot is left `None` either way, so a second commit/rollback -- or an
+// execute_in_transaction -- against the same resource fails clearly instead of reusing
+// an already-finished JDBC connection.
+#[rustler::nif(schedule = "DirtyIo")]
+fn commit(txn: ResourceArc<FrlTransaction>) -> Result<rustler::Atom, RustlerError> {
+    finish_transaction(txn, "commit")
+}
+
+#[rustler::nif(schedule = "DirtyIo")]
+fn rollback(txn: ResourceArc<FrlTransaction>) -> Result<rustler::Atom, RustlerError> {
+    finish_transaction(txn, "rollback")
+}
+
+fn finish_transaction(
+    txn: ResourceArc<FrlTransaction>,
+    method: &str,
+) -> Result<rustler::Atom, RustlerError> {
+    let vm = jvm().map_err(err_term)?;
+    let mut env = vm
+        .attach_current_thread()
+        .map_err(|e| err_term(format!("attaching to the JVM failed: {e}")))?;
+
+    let mut guard = txn.conn.lock().unwrap();
+    let Some(global) = guard.take() else {
+        return Err(err_term("this transaction is already finished".to_string()));
+    };
+
+    let result = env.call_static_method(
+        "bridge/Bridge",
+        method,
+        "(Ljava/lang/Object;)V",
+        &[JValue::Object(global.as_obj())],
+    );
+
+    match result {
+        Ok(_) => Ok(rustler::types::atom::ok()),
+        Err(_) => Err(err_term(describe_pending_exception(&mut env))),
+    }
+}
+
 #[rustler::nif(schedule = "DirtyIo")]
 fn close(conn: ResourceArc<FrlConnection>) -> Result<rustler::Atom, RustlerError> {
     let vm = jvm().map_err(err_term)?;
@@ -223,6 +380,9 @@ fn close(conn: ResourceArc<FrlConnection>) -> Result<rustler::Atom, RustlerError
 // `connect/1` call happens to be.
 fn on_load(env: Env, info: rustler::Term) -> bool {
     if env.register::<FrlConnection>().is_err() {
+        return false;
+    }
+    if env.register::<FrlTransaction>().is_err() {
         return false;
     }
 
