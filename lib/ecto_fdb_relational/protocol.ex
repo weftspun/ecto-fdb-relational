@@ -123,19 +123,23 @@ defmodule EctoFdbRelational.Protocol do
     {:ok, query, state}
   end
 
-  # FRL's own JDBC quick-start connects to this exact well-known, always-
-  # existing system database/schema ("jdbc:embed:/__SYS?schema=CATALOG")
-  # to run catalog-level DDL -- CREATE/DROP DATABASE and CREATE/DROP
-  # SCHEMA TEMPLATE. fdb-relational-server rejects *every* StatementRequest
-  # whose `database` field names something that doesn't exist, including
-  # these, even though their SQL text fully qualifies its own target and
-  # doesn't reference the connection's configured database at all. So
-  # EctoFdbRelational.Ddl's bootstrap statements (and this test's) must be
-  # sent against "/__SYS"/"CATALOG" rather than the Repo's configured
-  # (and not-yet-existent) :database/:relational_schema.
+  # FRL's own JDBC quick-start runs *every* catalog-level DDL statement --
+  # CREATE/DROP DATABASE, CREATE/DROP SCHEMA TEMPLATE, and even
+  # "CREATE SCHEMA /path/name WITH TEMPLATE ..." itself (which names a
+  # database that was only just created earlier in the same bootstrap
+  # sequence) -- over one connection to this exact well-known, always-
+  # existing system database/schema ("jdbc:embed:/__SYS?schema=CATALOG").
+  # fdb-relational-server rejects *every* StatementRequest whose `database`
+  # field names something that doesn't exist -- including a database that
+  # was just created in a prior statement on the same connection, which
+  # rules out simply passing the real target once it should exist -- so
+  # EctoFdbRelational.Ddl's bootstrap statements (and this test's) must all
+  # be sent against "/__SYS"/"CATALOG" rather than the Repo's configured
+  # :database/:relational_schema. Only regular DML against an already-
+  # provisioned schema uses the Repo's configured database/schema.
   @catalog_database "/__SYS"
   @catalog_schema "CATALOG"
-  @catalog_level_ddl ~r/\A\s*(CREATE|DROP)\s+(DATABASE|SCHEMA\s+TEMPLATE)\b/i
+  @catalog_level_ddl ~r/\A\s*(CREATE|DROP)\s+(DATABASE|SCHEMA)\b/i
 
   @impl true
   def handle_execute(%Query{statement: statement, command: command} = query, params, opts, state) do
