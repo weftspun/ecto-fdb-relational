@@ -56,7 +56,14 @@ defmodule EctoFdbRelational.IntegrationTest do
       port: port,
       database: database,
       relational_schema: "PUBLIC",
-      pool_size: 2
+      # pool_size: 1, not the DBConnection/Ecto default of >1 -- CI showed
+      # INSERT failing with "Database ... does not exist" right after the
+      # bootstrap DDL created that exact database and ran a subsequent
+      # statement against it successfully. The only difference between
+      # those two calls is which pooled connection handles them; this
+      # avoids a second gRPC connection/session seeing stale
+      # database/directory-layer state from before the bootstrap ran.
+      pool_size: 1
     )
 
     {:ok, _pid} = Repo.start_link()
