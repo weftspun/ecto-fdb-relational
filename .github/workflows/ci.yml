@@ -47,6 +47,15 @@ jobs:
             native/ecto_fdb_relational_nif/target
           key: ${{ runner.os }}-cargo-${{ hashFiles('native/ecto_fdb_relational_nif/Cargo.lock') }}
 
+      # PLTs are rebuilt whenever the OTP/Elixir versions or deps change (the same
+      # inputs dialyxir itself keys its PLT filenames on) -- see .dialyzer_ignore.exs
+      # for the handful of warnings this doesn't otherwise cover.
+      - name: Restore Dialyzer PLT cache
+        uses: actions/cache@v4
+        with:
+          path: _build/dev/*.plt*
+          key: ${{ runner.os }}-dialyzer-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mix.lock') }}
+
       # native/ecto_fdb_relational_nif (a Rustler NIF that embeds a JVM -- see ADR 0003)
       # links against libjvm at compile time, and native/frl_bridge (the one Java class it
       # calls into) is compiled against the FRL jars, as ordinary parts of `mix compile`
@@ -61,6 +70,7 @@ jobs:
       - run: mix deps.get
       - run: mix format --check-formatted
       - run: mix compile --warnings-as-errors
+      - run: mix dialyzer
       - run: mix test
         # test/ecto_fdb_relational/integration_test.exs skips itself here (no
         # FRL_TEST_CLUSTER_FILE) -- it runs for real in the `integration` job below.
@@ -93,7 +103,7 @@ jobs:
           path: |
             deps
             _build
-          key: ${{ runner.os }}-mix-1.18-27-${{ hashFiles('mix.lock') }}
+          key: ${{ runner.os }}-mix-1.20-29-${{ hashFiles('mix.lock') }}
 
       - name: Restore Rust NIF build cache
         uses: actions/cache@v4
