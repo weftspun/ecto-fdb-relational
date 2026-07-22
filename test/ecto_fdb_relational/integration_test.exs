@@ -27,6 +27,8 @@ defmodule EctoFdbRelational.IntegrationTest do
   """
   use ExUnit.Case, async: false
 
+  import Ecto.Query
+
   alias EctoFdbRelational.Test.Repo
 
   @skip_reason (if System.get_env("FRL_TEST_CLUSTER_FILE") do
@@ -126,7 +128,6 @@ defmodule EctoFdbRelational.IntegrationTest do
     assert fetched.name == "Alice"
     assert fetched.email == "alice@example.com"
 
-    import Ecto.Query
     found = Repo.one(from(c in Customer, where: c.email == ^"alice@example.com"))
     assert found.id == 1
 
@@ -138,5 +139,41 @@ defmodule EctoFdbRelational.IntegrationTest do
 
     {1, nil} = from(c in Customer, where: c.id == ^1) |> Repo.delete_all()
     assert Repo.all(Customer) == []
+  end
+
+  test "Repo.transaction/2 batches multiple statements into one real, isolated FDB transaction" do
+    {:ok, _} =
+      Repo.transaction(fn ->
+        for i <- 1..5 do
+          {:ok, _} =
+            %Customer{id: i, name: "Bulk#{i}", email: "bulk#{i}@example.com"}
+            |> Ecto.Changeset.change()
+            |> Repo.insert()
+        end
+
+        # Reads inside the still-open transaction see the transaction's own
+        # uncommitted writes (read-your-writes) -- see EctoFdbRelational.Protocol's
+        # "Transactions" moduledoc section.
+        assert length(Repo.all(Customer)) == 5
+      end)
+
+    assert length(Repo.all(Customer)) == 5
+    assert Enum.map(Repo.all(Customer), & &1.id) |> Enum.sort() == [1, 2, 3, 4, 5]
+
+    from(c in Customer) |> Repo.delete_all()
+    assert Repo.all(Customer) == []
+  end
+
+  test "Repo.transaction/2 rolls back every statement in the block on Repo.rollback/1" do
+    Repo.transaction(fn ->
+      {:ok, _} =
+        %Customer{id: 99, name: "Rolled Back", email: "rollback@example.com"}
+        |> Ecto.Changeset.change()
+        |> Repo.insert()
+
+      Repo.rollback(:changed_my_mind)
+    end)
+
+    assert Repo.all(from(c in Customer, where: c.id == 99)) == []
   end
 end

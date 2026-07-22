@@ -40,7 +40,14 @@ defmodule EctoFdbRelational.Native do
   # `{:ok, _}` tuple -- that's how a Rust NIF returning `Result<T, rustler::Error>`
   # encodes `Ok(t)` (see rustler::error::Error's NifReturnable impl). Only the error
   # case is a tagged `{:error, reason}` tuple.
-  @dialyzer {:no_return, connect: 1, execute: 2, close: 1}
+  @dialyzer {:no_return,
+             connect: 1,
+             execute: 2,
+             close: 1,
+             begin: 3,
+             execute_in_transaction: 2,
+             commit: 1,
+             rollback: 1}
 
   @spec connect(String.t()) :: reference() | {:error, String.t()}
   def connect(_cluster_file), do: :erlang.nif_error(:nif_not_loaded)
@@ -50,4 +57,20 @@ defmodule EctoFdbRelational.Native do
 
   @spec close(reference()) :: :ok | {:error, String.t()}
   def close(_conn), do: :erlang.nif_error(:nif_not_loaded)
+
+  # See EctoFdbRelational.Protocol's "Transactions" moduledoc section for why these
+  # exist alongside execute/2 rather than replacing it: a real, explicit,
+  # autocommit-disabled FDB transaction, opened against one fixed database/schema for
+  # its whole lifetime (unlike execute/2, which takes database/schema per call).
+  @spec begin(reference(), String.t(), String.t()) :: reference() | {:error, String.t()}
+  def begin(_conn, _database, _schema), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec execute_in_transaction(reference(), binary()) :: binary() | {:error, String.t()}
+  def execute_in_transaction(_txn, _request_bytes), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec commit(reference()) :: :ok | {:error, String.t()}
+  def commit(_txn), do: :erlang.nif_error(:nif_not_loaded)
+
+  @spec rollback(reference()) :: :ok | {:error, String.t()}
+  def rollback(_txn), do: :erlang.nif_error(:nif_not_loaded)
 end

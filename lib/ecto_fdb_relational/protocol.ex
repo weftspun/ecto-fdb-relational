@@ -25,14 +25,31 @@ defmodule EctoFdbRelational.Protocol do
     * `:relational_schema` - defaults to `"PUBLIC"`, the schema instantiated
       via `CREATE SCHEMA /frl/my_app/PUBLIC WITH TEMPLATE ...`
 
-  ## Transactions (known gap)
+  ## Transactions
 
-  FRL's `FRL.execute`/`FRL.update` are effectively autocommit-per-call, same as the old
-  gRPC `JDBCService.execute`/`update` RPCs were -- see the README "Known gaps" section.
-  `handle_begin/2`, `handle_commit/2` and `handle_rollback/2` below are **no-ops that do
-  not provide atomicity or isolation**; each individual statement commits exactly as if
-  you called it outside of `Repo.transaction/2`. This is called out loudly rather than
-  silently pretended away.
+  `Repo.transaction(fn -> ... end)` batches every DML statement (`select`/`insert`/
+  `update_all`/`delete_all` -- **not DDL**, see below) issued inside it into one real,
+  isolated FDB transaction via `EctoFdbRelational.Native.begin/3`, instead of the one
+  commit per statement `handle_execute/4` otherwise does (a plain autocommit call via
+  `Native.execute/2`, still what runs outside a `Repo.transaction/2` block). This is a
+  real win, not just correctness: batching removes almost all of FDB's own per-statement
+  transaction-commit latency, which dominates this transport's total per-call cost --
+  see `EctoFdbRelational.Native`'s moduledoc, and `native/frl_bridge/Bridge.java`'s for
+  exactly how (a real, autocommit-disabled `RelationalConnection`, the same JDBC
+  interface the documented `jdbc:embed:` driver hands out, not FRL's own always-
+  autocommit `FRL.execute` convenience wrapper).
+
+  **DDL is not supported inside a transaction** -- `handle_execute/4` raises a clear
+  `EctoFdbRelational.Error` rather than silently running it against the wrong
+  connection. Every catalog-level DDL statement this adapter issues (`CREATE`/`DROP
+  DATABASE`/`SCHEMA`/`SCHEMA TEMPLATE`, see `@catalog_level_ddl` below) targets
+  `/__SYS`/`CATALOG`, but a transaction's `RelationalConnection` is opened against one
+  fixed database/schema (the Repo's configured `:database`/`:relational_schema`) for its
+  whole lifetime -- there is no way to redirect a single statement within it to a
+  different database/schema the way `Native.execute/2`'s per-call `database`/`schema`
+  arguments do. This isn't a real-world gap in practice: `Adapter.supports_ddl_transaction?/0`
+  is already `false`, so Ecto migrations never run inside a `Repo.transaction/2` here
+  regardless.
 
   ## No crash isolation (known gap, see ADR 0003)
 
@@ -50,7 +67,7 @@ defmodule EctoFdbRelational.Protocol do
   alias EctoFdbRelational.{Error, Native, Query, Types}
   alias Grpc.Relational.Jdbc.V1.{Parameter, Parameters, StatementRequest, StatementResponse}
 
-  defstruct [:conn, :database, :schema, :cluster_file]
+  defstruct [:conn, :database, :schema, :cluster_file, :txn]
 
   @default_schema "PUBLIC"
 
@@ -158,9 +175,21 @@ defmodule EctoFdbRelational.Protocol do
   @impl true
   def handle_execute(%Query{statement: statement} = query, params, _opts, state) do
     sql = IO.iodata_to_binary(statement)
+    catalog_ddl? = Regex.match?(@catalog_level_ddl, sql)
+
+    if catalog_ddl? and state.txn do
+      # See moduledoc's "Transactions" section: a transaction's connection is pinned
+      # to the Repo's configured database/schema for its whole lifetime, so a
+      # catalog-level statement (which must target /__SYS/CATALOG) can't run on it.
+      raise EctoFdbRelational.Error,
+        message:
+          "EctoFdbRelational does not support catalog-level DDL (#{inspect(sql)}) inside " <>
+            "a Repo.transaction/2 block -- see EctoFdbRelational.Protocol's moduledoc " <>
+            "\"Transactions\" section for why"
+    end
 
     {database, schema} =
-      if Regex.match?(@catalog_level_ddl, sql),
+      if catalog_ddl?,
         do: {@catalog_database, @catalog_schema},
         else: {state.database, state.schema}
 
@@ -183,8 +212,15 @@ defmodule EctoFdbRelational.Protocol do
     # PreparedStatement when present, and handles plain non-parameterized
     # statements (DDL, literal-inlined UPDATEs) via the same path regardless,
     # returning either a ResultSet or an update count depending on what the
-    # SQL actually is.
-    case Native.execute(state.conn, request_bytes) do
+    # SQL actually is. Inside an open Repo.transaction/2 (state.txn set), this
+    # instead runs on that same still-open, autocommit-disabled transaction via
+    # Native.execute_in_transaction/2 -- see the moduledoc's "Transactions" section.
+    result =
+      if state.txn,
+        do: Native.execute_in_transaction(state.txn, request_bytes),
+        else: Native.execute(state.conn, request_bytes)
+
+    case result do
       {:error, reason} ->
         {:error, Error.from_reason(reason), state}
 
@@ -231,20 +267,36 @@ defmodule EctoFdbRelational.Protocol do
 
   defp decode_row(_), do: []
 
-  ## Transactions -- see moduledoc. These intentionally do not talk to FRL:
-  ## real cross-statement atomicity isn't implemented yet (see the README).
+  ## Transactions -- see moduledoc's "Transactions" section.
 
   @impl true
-  def handle_begin(_opts, state), do: {:ok, %{}, state}
+  def handle_begin(_opts, state) do
+    case Native.begin(state.conn, state.database, state.schema) do
+      {:error, reason} -> {:error, Error.from_reason(reason), state}
+      txn -> {:ok, %{}, %{state | txn: txn}}
+    end
+  end
 
   @impl true
-  def handle_commit(_opts, state), do: {:ok, %{}, state}
+  def handle_commit(_opts, state) do
+    case Native.commit(state.txn) do
+      {:error, reason} -> {:error, Error.from_reason(reason), state}
+      :ok -> {:ok, %{}, %{state | txn: nil}}
+    end
+  end
 
   @impl true
-  def handle_rollback(_opts, state), do: {:ok, %{}, state}
+  def handle_rollback(_opts, state) do
+    case Native.rollback(state.txn) do
+      {:error, reason} -> {:error, Error.from_reason(reason), state}
+      :ok -> {:ok, %{}, %{state | txn: nil}}
+    end
+  end
 
   @impl true
-  def handle_status(_opts, state), do: {:idle, state}
+  def handle_status(_opts, state) do
+    if state.txn, do: {:transaction, state}, else: {:idle, state}
+  end
 
   @impl true
   def handle_close(_query, _opts, state), do: {:ok, %{}, state}
