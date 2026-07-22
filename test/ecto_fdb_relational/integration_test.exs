@@ -16,9 +16,10 @@ defmodule EctoFdbRelational.IntegrationTest do
   See the README's "Running the integration tests" section for how to
   stand up `fdb-relational-server` (Maven Central artifacts, verified
   working this session -- no source build needed) plus a real FDB cluster.
-  This repo's own CI does **not** have a live FoundationDB cluster
-  available, so this suite does not run there either; see the README for
-  exactly what that means for the honesty of this project's test coverage.
+  The `integration` job in `.github/workflows/ci.yml` stands up exactly
+  this (a real single-node FoundationDB cluster + a real
+  `fdb-relational-server` process) and runs this suite against it on every
+  push/PR -- see the README for details.
   """
   use ExUnit.Case, async: false
 

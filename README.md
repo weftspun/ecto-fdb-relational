@@ -9,9 +9,10 @@ served by `fdb-relational-server` and spoken to here over gRPC directly
 > **Status: v0.1, pre-1.0.** This adapter implements enough of Ecto's query
 > API and migrations for basic CRUD, and is honest in code and here about
 > exactly what it does and doesn't do yet. Read "Known gaps" below before
-> using this for anything real. It has **not** been run against a live
-> FoundationDB cluster in the environment this was built in (no Java
-> available) -- see "Running the integration tests".
+> using this for anything real. It was **not** run against a live
+> FoundationDB cluster in the sandbox this was originally built in (no
+> Java available); CI's `integration` job now does that on every push/PR
+> -- see "Running the integration tests".
 
 ## What FRL is
 
@@ -201,22 +202,24 @@ FRL_TEST_PORT=8123 mix test test/ecto_fdb_relational/integration_test.exs
 # optional: FRL_TEST_HOST=localhost FRL_TEST_DATABASE=/frl/ecto_fdb_relational_test
 ```
 
-This project's own development/CI environment did **not** have a live
-FoundationDB cluster + `fdb-relational-server` available (no Java runtime
-in the sandbox this was built in), so **this integration suite has not
-actually been run against a live server as part of building this
-adapter**. That is stated plainly rather than claimed otherwise. What
-*has* been run and passes:
+This project's own development environment (the sandbox this was
+originally built in) did **not** have a live FoundationDB cluster +
+`fdb-relational-server` available (no Java runtime), so the integration
+suite was not run against a live server as part of *building* this
+adapter. That gap is now closed in CI: the `integration` job in
+[`.github/workflows/ci.yml`](.github/workflows/ci.yml) installs a real
+single-node FoundationDB 7.1.26 cluster (the `foundationdb-server`
+Debian package, which auto-configures itself), downloads the same
+`fdb-relational-server-4.3.6.0-all.jar` referenced above from Maven
+Central, starts it against that cluster, and runs
+`test/ecto_fdb_relational/integration_test.exs` for real -- on every push
+and pull request, not just `test/ecto_fdb_relational/adapter/connection_test.exs`
+(the SQL-builder unit tests, which need no live server and always ran).
 
-```sh
-mix test   # test/ecto_fdb_relational/adapter/connection_test.exs --
-           # unit tests of the SQL builder via Ecto.Query.Planner,
-           # no live server needed
-```
-
-If you do run the integration suite against a real server and hit
-something that contradicts a claim in this README or `ADR.md`, that's a
-real bug/documentation error -- please open an issue with what you saw.
+If that job goes red, or you run the integration suite locally against a
+real server and hit something that contradicts a claim in this README or
+`ADR.md`, that's a real bug/documentation error -- please open an issue
+with what you saw.
 
 ## Development
 
