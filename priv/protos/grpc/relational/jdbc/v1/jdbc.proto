@@ -1,0 +1,300 @@
+/*
+ * jdbc.proto
+ *
+ * This source file is part of the FoundationDB open source project
+ *
+ * Copyright 2021-2024 Apple Inc. and the FoundationDB project authors
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+syntax = "proto3";
+package grpc.relational.jdbc.v1;
+
+option java_multiple_files = true;
+// Put the generated classes into grpc subpackage so I can exclude
+// these classes from checkstyle and spotbug checks.
+option java_package = "com.apple.foundationdb.relational.jdbc.grpc.v1";
+option java_outer_classname = "RelationalJDBCService";
+
+import "grpc/relational/jdbc/v1/result_set.proto";
+import "grpc/relational/jdbc/v1/column.proto";
+import "google/protobuf/any.proto";
+
+service JDBCService {
+  rpc getMetaData(DatabaseMetaDataRequest) returns (DatabaseMetaDataResponse) {}
+  rpc execute(StatementRequest) returns (StatementResponse) {}
+  rpc handleAutoCommitOff(stream TransactionalRequest) returns (stream TransactionalResponse) {}
+  rpc update(StatementRequest) returns (StatementResponse) {}
+  rpc insert(InsertRequest) returns (InsertResponse) {}
+  rpc get(GetRequest) returns (GetResponse) {}
+  rpc scan(ScanRequest) returns (ScanResponse) {}
+}
+
+message KeySetValue {
+  oneof values {
+    string string_value = 1;
+    int64 long_value = 2;
+    bytes bytes_value = 3;
+  }
+}
+
+message KeySet {
+  map<string, KeySetValue> fields = 1;
+}
+
+// Use 'optional' keyword to trigger 'explicit presence':
+// https://github.com/protocolbuffers/protobuf/blob/main/docs/field_presence.md#how-to-enable-explicit-presence-in-proto3
+message ScanRequest {
+  optional KeySet key_set = 1;
+  optional string database = 2;
+  optional string schema = 3;
+  optional string table_name = 4;
+  Options options = 5;
+}
+
+message ScanResponse {
+  grpc.relational.jdbc.v1.ResultSet result_set = 1;
+}
+
+message GetRequest {
+  optional KeySet key_set = 1;
+  optional string database = 2;
+  optional string schema = 3;
+  optional string table_name = 4;
+  Options options = 5;
+}
+
+message GetResponse {
+  grpc.relational.jdbc.v1.ResultSet result_set = 1;
+}
+
+message InsertRequest {
+
+  // We use ResultSet to carry data from client to server -- inverting its
+  // usual intent.
+  ResultSet dataResultSet = 5;
+
+  optional string database = 2;
+  optional string schema = 3;
+  optional string table_name = 4;
+  // '5' is taken... see above in oneof 'data'.
+
+  Options options = 6;
+}
+
+message ListBytes {
+  repeated bytes bytes = 1;
+}
+
+message InsertResponse {
+  int32 row_count = 1;
+}
+
+// Parameters for PreparedStatement
+message Parameters {
+  repeated Parameter parameter = 1;
+}
+
+// A parameter has java sql type as well as actual parameter.
+message Parameter {
+  int32 java_sql_types_code = 1 [deprecated = true];
+  // Reuse the column type here. It has much of what we need carrying
+  // across parameters as well as null support, etc.
+  Column parameter = 2;
+  Type type = 3 [deprecated = true]; // deprecated
+  ParameterMetadata metadata = 4;
+}
+
+message ParameterMetadata {
+  int32 java_sql_types_code = 1 [deprecated = true];
+  Type type = 2;
+  oneof metadata {
+    StructMetadata structMetadata = 3;
+    ColumnMetadata arrayMetadata = 4;
+    EnumMetadata enumMetadata = 5;
+    VectorMetadata vectorMetadata = 6;
+  }
+}
+
+message Options {
+  optional int32 max_rows = 1;
+  optional bytes continuation = 2;
+  optional string index_hint = 3;
+  optional int32 required_metadata_table_version = 4;
+  optional int64 transaction_timeout = 5;
+  optional bool replace_on_duplicate_pk = 6;
+  optional int32 plan_cache_primary_max_entries = 7;
+  optional int32 plan_cache_secondary_max_entries = 8;
+  optional int32 plan_cache_tertiary_max_entries = 9;
+  optional int64 plan_cache_primary_time_to_live_millis = 10;
+  optional int64 plan_cache_secondary_time_to_live_millis = 11;
+  optional int64 plan_cache_tertiary_time_to_live_millis = 12;
+  enum IndexFetchMethod {
+    SCAN_AND_FETCH = 0;
+    USE_REMOTE_FETCH = 1;
+    USE_REMOTE_FETCH_WITH_FALLBACK = 2;
+  }
+  optional IndexFetchMethod index_fetch_method = 13;
+  repeated string disabled_planner_rules = 14;
+  optional bool disable_planner_rewriting = 15;
+  optional bool log_query = 16;
+  optional int64 log_slow_query_threshold_micros = 17;
+  optional int64 execution_time_limit = 18;
+  optional int64 execution_scanned_bytes_limit = 19;
+  optional int32 execution_scanned_rows_limit = 20;
+  optional bool dry_run = 21;
+  optional bool case_sensitive_identifiers = 22;
+  optional string current_plan_hash_mode = 23;
+  optional string valid_plan_hash_modes = 24;
+  optional int64 async_operations_timeout_millis = 26;
+  optional bool encrypt_when_serializing = 27;
+  optional string encryption_key_store = 28;
+  optional string encryption_key_entry = 29;
+  optional string encryption_key_password = 30;
+  optional bool compress_when_serializing = 31;
+  repeated string encryption_key_entry_list = 32;
+  optional bool plan_right_deep = 33;
+}
+
+// Request that is part of a transactional (stateful) exchange
+message TransactionalRequest {
+  oneof TransactionalMessage {
+      StatementRequest executeRequest = 1;
+      InsertRequest insertRequest = 2;
+      CommitRequest commitRequest = 3;
+      RollbackRequest rollbackRequest = 4;
+      EnableAutoCommitRequest enableAutoCommitRequest = 5;
+  }
+}
+
+message TransactionalResponse {
+  oneof TransactionalMessage {
+      StatementResponse executeResponse = 1;
+      InsertResponse insertResponse = 2;
+      CommitResponse commitResponse = 3;
+      RollbackResponse rollbackResponse = 4;
+
+      google.protobuf.Any errorResponse = 5;
+
+      EnableAutoCommitResponse enableAutoCommitResponse = 6;
+  }
+}
+
+message StatementRequest {
+  optional string sql = 1;
+  optional string database = 2;
+  optional string schema = 3;
+  // If present, then the sql is a preparedstatement and these are the parameters to populate the
+  // prepared statement with (The Relational planner wants sql and parameters separate).
+  Parameters parameters = 4;
+  Options options = 5;
+}
+
+// FYI: RS from Spanner https://github.com/googleapis/googleapis/blob/master/google/spanner/v1/result_set.proto
+message StatementResponse {
+  int32 row_count = 1;
+  grpc.relational.jdbc.v1.ResultSet result_set = 2;
+}
+
+message CommitRequest {
+}
+
+message CommitResponse {
+}
+
+message RollbackRequest {
+}
+
+message RollbackResponse {
+}
+
+message EnableAutoCommitRequest {
+  Options options = 1;
+}
+
+message EnableAutoCommitResponse {
+}
+
+message DatabaseMetaDataRequest {
+  Options options = 1;
+}
+message DatabaseMetaDataResponse {
+  string url = 1;
+  string database_product_version = 2;
+
+      // From https://docs.oracle.com/en/java/javase/12/docs/api/java.sql/java/sql/DatabaseMetaData.html
+      // 
+      // Being careful about what we expose. Only add attributes that make sense for relational.
+      // Throw not implemented for all else.
+      //
+      // static int	bestRowNotPseudo
+      // static int	bestRowPseudo
+      // static int	bestRowSession
+      // static int	bestRowTemporary
+      // static int	bestRowTransaction
+      // static int	bestRowUnknown
+      // static int	columnNoNulls
+      // static int	columnNullable
+      // static int	columnNullableUnknown
+      // static int	functionColumnIn
+      // static int	functionColumnInOut
+      // static int	functionColumnOut
+      // static int	functionColumnResult
+      // static int	functionColumnUnknown
+      // static int	functionNoNulls
+      // static int	functionNoTable
+      // static int	functionNullable
+      // static int	functionNullableUnknown
+      // static int	functionResultUnknown
+      // static int	functionReturn
+      // static int	functionReturnsTable
+      // static int	importedKeyCascade
+      // static int	importedKeyInitiallyDeferred
+      // static int	importedKeyInitiallyImmediate
+      // static int	importedKeyNoAction
+      // static int	importedKeyNotDeferrable
+      // static int	importedKeyRestrict
+      // static int	importedKeySetDefault
+      // static int	importedKeySetNull
+      // static int	procedureColumnIn
+      // static int	procedureColumnInOut
+      // static int	procedureColumnOut
+      // static int	procedureColumnResult
+      // static int	procedureColumnReturn
+      // static int	procedureColumnUnknown
+      // static int	procedureNoNulls
+      // static int	procedureNoResult
+      // static int	procedureNullable
+      // static int	procedureNullableUnknown
+      // static int	procedureResultUnknown
+      // static int	procedureReturnsResult
+      // static int	sqlStateSQL
+      // static int	sqlStateSQL99
+      // static int	sqlStateXOpen
+      // static short	tableIndexClustered
+      // static short	tableIndexHashed
+      // static short	tableIndexOther
+      // static short	tableIndexStatistic
+      // static int	typeNoNulls
+      // static int	typeNullable
+      // static int	typeNullableUnknown
+      // static int	typePredBasic
+      // static int	typePredChar
+      // static int	typePredNone
+      // static int	typeSearchable
+      // static int	versionColumnNotPseudo
+      // static int	versionColumnPseudo
+      // static int	versionColumnUnknown
+      // etc.
+}
