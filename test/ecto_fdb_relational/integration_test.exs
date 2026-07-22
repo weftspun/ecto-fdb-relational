@@ -102,7 +102,11 @@ defmodule EctoFdbRelational.IntegrationTest do
 
     assert customer.id == 1
 
+    raw = Repo.query!("SELECT id, name, email FROM customers", [])
+    IO.inspect(raw, label: "RAW SELECT")
+
     [fetched] = Repo.all(Customer)
+    IO.inspect(fetched, label: "DECODED STRUCT")
     assert fetched.name == "Alice"
     assert fetched.email == "alice@example.com"
 
