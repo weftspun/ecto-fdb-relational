@@ -95,6 +95,23 @@ defmodule EctoFdbRelational.IntegrationTest do
   end
 
   test "insert, select, update, delete round-trip through Ecto's query API" do
+    literal_insert =
+      Repo.query!(
+        "INSERT INTO customers VALUES (2, 'Bob', 'bob@example.com')",
+        [],
+        command: :update
+      )
+
+    IO.inspect(literal_insert, label: "LITERAL INSERT (no params)")
+
+    literal_select = Repo.query!("SELECT id, name, email FROM customers WHERE id = 2", [])
+    IO.inspect(literal_select, label: "LITERAL SELECT (no params, row inserted w/o params)")
+
+    param_select =
+      Repo.query!("SELECT id, name, email FROM customers WHERE id = ?", [2])
+
+    IO.inspect(param_select, label: "PARAM SELECT (params on select, row inserted w/o params)")
+
     {:ok, customer} =
       %Customer{id: 1, name: "Alice", email: "alice@example.com"}
       |> Ecto.Changeset.change()
@@ -102,8 +119,8 @@ defmodule EctoFdbRelational.IntegrationTest do
 
     assert customer.id == 1
 
-    raw = Repo.query!("SELECT id, name, email FROM customers", [])
-    IO.inspect(raw, label: "RAW SELECT")
+    raw = Repo.query!("SELECT id, name, email FROM customers WHERE id = 1", [])
+    IO.inspect(raw, label: "RAW SELECT (row inserted w/ params)")
 
     [fetched] = Repo.all(Customer)
     IO.inspect(fetched, label: "DECODED STRUCT")
