@@ -159,8 +159,17 @@ defmodule EctoFdbRelational.Protocol do
 
     grpc_opts = grpc_call_opts(opts)
 
+    # fdb-relational-server's `update` RPC handler drops parameters
+    # entirely (it calls FRL.update(database, schema, sql) -- no
+    # parameters argument exists on that method), executing the raw SQL
+    # text with its "?" placeholders unbound. Only `execute` forwards
+    # StatementRequest.parameters through to a real PreparedStatement
+    # (FRL.execute(..., parameters, ...)), and it handles mutations fine
+    # too -- FRL.execute returns either a ResultSet or an update count
+    # depending on the statement. So any statement carrying parameters
+    # must go through `execute`, regardless of :select vs :insert/etc.
     rpc_fun =
-      if command in [:select, :explain],
+      if command in [:select, :explain] or params != [],
         do: &JDBCService.Stub.execute/3,
         else: &JDBCService.Stub.update/3
 
