@@ -38,3 +38,10 @@ defimpl DBConnection.Query, for: EctoFdbRelational.Query do
 
   def decode(_query, result, _opts), do: result
 end
+
+defimpl String.Chars, for: EctoFdbRelational.Query do
+  # Ecto.Adapters.SQL.log/5 stringifies the query for telemetry/logging on
+  # every call (including failed ones), so this needs to exist for any
+  # error to be reported instead of masked by a Protocol.UndefinedError.
+  def to_string(query), do: IO.iodata_to_binary(query.statement)
+end

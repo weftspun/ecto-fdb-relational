@@ -66,26 +66,25 @@ defmodule EctoFdbRelational.Protocol do
               "EctoFdbRelational requires :database (e.g. \"/frl/my_app\") in the Repo config"
 
     relational_schema = Keyword.get(opts, :relational_schema, @default_schema)
-    address = "#{hostname}:#{port}"
 
-    case GRPC.Stub.connect(address, connect_opts(opts)) do
-      {:ok, channel} ->
-        # See EctoFdbRelational.Ddl moduledoc: execute_ddl/1 has no access to
-        # repo config, so we stash the target database/schema here, the
-        # first point at which we definitely have it and definitely run
-        # before any migration can execute.
-        EctoFdbRelational.Ddl.put_ddl_context(database, relational_schema)
+    with {:ok, ip} <- :inet.getaddr(String.to_charlist(hostname), :inet),
+         address = "#{:inet.ntoa(ip)}:#{port}",
+         {:ok, channel} <- GRPC.Stub.connect(address, connect_opts(opts)) do
+      # See EctoFdbRelational.Ddl moduledoc: execute_ddl/1 has no access to
+      # repo config, so we stash the target database/schema here, the
+      # first point at which we definitely have it and definitely run
+      # before any migration can execute.
+      EctoFdbRelational.Ddl.put_ddl_context(database, relational_schema)
 
-        {:ok,
-         %__MODULE__{
-           channel: channel,
-           database: database,
-           schema: relational_schema,
-           address: address
-         }}
-
-      {:error, reason} ->
-        {:error, Error.from_reason(reason)}
+      {:ok,
+       %__MODULE__{
+         channel: channel,
+         database: database,
+         schema: relational_schema,
+         address: address
+       }}
+    else
+      {:error, reason} -> {:error, Error.from_reason(reason)}
     end
   end
 
@@ -124,12 +123,37 @@ defmodule EctoFdbRelational.Protocol do
     {:ok, query, state}
   end
 
+  # FRL's own JDBC quick-start runs *every* catalog-level DDL statement --
+  # CREATE/DROP DATABASE, CREATE/DROP SCHEMA TEMPLATE, and even
+  # "CREATE SCHEMA /path/name WITH TEMPLATE ..." itself (which names a
+  # database that was only just created earlier in the same bootstrap
+  # sequence) -- over one connection to this exact well-known, always-
+  # existing system database/schema ("jdbc:embed:/__SYS?schema=CATALOG").
+  # fdb-relational-server rejects *every* StatementRequest whose `database`
+  # field names something that doesn't exist -- including a database that
+  # was just created in a prior statement on the same connection, which
+  # rules out simply passing the real target once it should exist -- so
+  # EctoFdbRelational.Ddl's bootstrap statements (and this test's) must all
+  # be sent against "/__SYS"/"CATALOG" rather than the Repo's configured
+  # :database/:relational_schema. Only regular DML against an already-
+  # provisioned schema uses the Repo's configured database/schema.
+  @catalog_database "/__SYS"
+  @catalog_schema "CATALOG"
+  @catalog_level_ddl ~r/\A\s*(CREATE|DROP)\s+(DATABASE|SCHEMA)\b/i
+
   @impl true
   def handle_execute(%Query{statement: statement, command: command} = query, params, opts, state) do
+    sql = IO.iodata_to_binary(statement)
+
+    {database, schema} =
+      if Regex.match?(@catalog_level_ddl, sql),
+        do: {@catalog_database, @catalog_schema},
+        else: {state.database, state.schema}
+
     request = %StatementRequest{
-      sql: IO.iodata_to_binary(statement),
-      database: state.database,
-      schema: state.schema,
+      sql: sql,
+      database: database,
+      schema: schema,
       parameters: %Parameters{parameter: Enum.map(params, &encode_parameter/1)}
     }
 
