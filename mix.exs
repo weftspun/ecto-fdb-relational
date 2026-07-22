@@ -44,7 +44,7 @@ defmodule EctoFdbRelational.MixProject do
     ]
   end
 
-  defp elixirc_paths(:test), do: ["lib", "test/support"]
+  defp elixirc_paths(:test), do: ["lib", "test/support", "bench"]
   defp elixirc_paths(_), do: ["lib"]
 
   defp deps do
@@ -64,7 +64,12 @@ defmodule EctoFdbRelational.MixProject do
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false},
-      {:excoveralls, "~> 0.18", only: :test}
+      {:excoveralls, "~> 0.18", only: :test},
+
+      # bench/ -- ports weftspun/scenario-tpcc-bench's TPC-C-style scenarios
+      # onto this adapter. Benchee's `:parallel` runner replaces a
+      # hand-rolled worker pool; not part of the published package.
+      {:benchee, "~> 1.3", only: :test}
     ]
   end
 

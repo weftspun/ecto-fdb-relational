@@ -108,3 +108,75 @@ jobs:
           name: fdb-relational-server-log
           path: /tmp/relational-server.log
           if-no-files-found: ignore
+
+  bench-tpcc:
+    name: Bench (tpcc, ported from weftspun/scenario-tpcc-bench)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      FDB_VERSION: "7.1.26"
+      FRS_VERSION: "4.3.6.0"
+      FDB_CLUSTER_FILE: /etc/foundationdb/fdb.cluster
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.18"
+          otp-version: "27"
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Restore deps cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            deps
+            _build
+          key: ${{ runner.os }}-mix-1.18-27-${{ hashFiles('mix.lock') }}
+
+      - name: Install FoundationDB ${{ env.FDB_VERSION }} (single-node, auto-configured)
+        run: |
+          curl -fsSL -o /tmp/fdb-clients.deb \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-clients_${FDB_VERSION}-1_amd64.deb"
+          curl -fsSL -o /tmp/fdb-server.deb \
+            "https://github.com/apple/foundationdb/releases/download/${FDB_VERSION}/foundationdb-server_${FDB_VERSION}-1_amd64.deb"
+          sudo dpkg -i /tmp/fdb-clients.deb /tmp/fdb-server.deb
+          for i in $(seq 1 30); do
+            fdbcli --exec 'status minimal' | grep -q 'The database is available' && break
+            sleep 2
+          done
+          fdbcli --exec status
+
+      - name: Download fdb-relational-server ${{ env.FRS_VERSION }}
+        run: |
+          curl -fsSL -o /tmp/fdb-relational-server.jar \
+            "https://repo1.maven.org/maven2/org/foundationdb/fdb-relational-server/${FRS_VERSION}/fdb-relational-server-${FRS_VERSION}-all.jar"
+
+      - name: Start fdb-relational-server
+        run: |
+          nohup java -cp /tmp/fdb-relational-server.jar \
+            com.apple.foundationdb.relational.server.RelationalServer -g 8123 -p 8124 \
+            > /tmp/relational-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            (exec 3<>/dev/tcp/127.0.0.1/8123) 2>/dev/null && exec 3<&- && break
+            sleep 2
+          done
+
+      - run: mix deps.get
+
+      - name: Run the ported tpcc benchmark (short, proof-of-execution only)
+        env:
+          FRL_TEST_PORT: "8123"
+        run: mix test test/bench_tpcc_test.exs --trace
+
+      - name: Upload fdb-relational-server log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fdb-relational-server-log-bench-tpcc
+          path: /tmp/relational-server.log
+          if-no-files-found: ignore
