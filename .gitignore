@@ -22,3 +22,12 @@ erl_crash.dump
 # Ignore package tarball (built via "mix hex.build").
 ecto_fdb_relational-*.tar
 
+# Rust NIF build artifacts (native/ecto_fdb_relational_nif, built via "mix compile" -- see
+# mix.exs and ADR 0003). Cargo.lock *is* tracked (see native/ecto_fdb_relational_nif/Cargo.lock).
+/native/ecto_fdb_relational_nif/target/
+/priv/native/
+
+# Compiled Java bridge classes (native/frl_bridge/src, compiled by mix.exs's :frl_bridge
+# compiler into priv/java/ -- see ADR 0003). Requires the FRL jars + a JDK to rebuild.
+/priv/java/
+

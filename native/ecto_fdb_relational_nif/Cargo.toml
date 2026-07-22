@@ -1,0 +1,25 @@
+[package]
+name = "ecto_fdb_relational_nif"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# See build.rs and the crate-level docs in src/lib.rs for what this crate does and
+# doesn't do. Short version: it embeds a JVM via `jni`'s "invocation" API and calls
+# into `bridge.Bridge` (native/frl_bridge), which calls FRL directly -- no gRPC, no
+# separate fdb-relational-server process. See ADR 0003.
+
+[lib]
+name = "ecto_fdb_relational_nif"
+crate-type = ["cdylib"]
+
+[dependencies]
+rustler = "0.38"
+jni = { version = "0.21", features = ["invocation"] }
+once_cell = "1"
+
+[build-dependencies]
+java-locator = "0.1"
+
+[profile.release]
+lto = true

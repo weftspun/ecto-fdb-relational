@@ -1,29 +1,20 @@
 defmodule EctoFdbRelational.Error do
   @moduledoc """
-  Wraps errors coming back from `fdb-relational-server`'s gRPC `JDBCService`
-  (a `GRPC.RPCError`, a transport-level `GRPC.Channel` failure, or a
-  malformed-response condition detected while decoding a `ResultSet`) in an
-  `Exception` so DBConnection / Ecto can surface it consistently.
+  Wraps a failure calling into FRL through `EctoFdbRelational.Native` (a Java exception
+  message flattened by the NIF, a JVM/attach-thread failure, or a malformed-response
+  condition detected while decoding a `StatementResponse`) in an `Exception` so
+  DBConnection/Ecto can surface it consistently.
   """
 
-  defexception [:message, :grpc_status, :grpc_reason]
+  defexception [:message]
 
-  @type t :: %__MODULE__{
-          message: String.t(),
-          grpc_status: non_neg_integer() | nil,
-          grpc_reason: term()
-        }
+  @type t :: %__MODULE__{message: String.t()}
 
   @doc false
-  def from_rpc_error(%GRPC.RPCError{status: status, message: message}) do
-    %__MODULE__{
-      message: "fdb-relational-server returned gRPC status #{status}: #{message}",
-      grpc_status: status,
-      grpc_reason: message
-    }
+  def from_reason(reason) do
+    %__MODULE__{message: "EctoFdbRelational.Native call failed: #{format_reason(reason)}"}
   end
 
-  def from_reason(reason) do
-    %__MODULE__{message: "fdb-relational-server request failed: #{inspect(reason)}"}
-  end
+  defp format_reason(reason) when is_binary(reason), do: reason
+  defp format_reason(reason), do: inspect(reason)
 end

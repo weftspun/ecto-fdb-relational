@@ -9,17 +9,16 @@ defmodule EctoFdbRelational.Adapter do
       end
 
       config :my_app, MyApp.Repo,
-        hostname: "localhost",
-        port: 8123,                       # the -g gRPC port fdb-relational-server was started with
+        cluster_file: "/etc/foundationdb/fdb.cluster",
         database: "/frl/my_app",
         relational_schema: "PUBLIC"        # optional, defaults to "PUBLIC"
 
   Built on top of `Ecto.Adapters.SQL` (the same toolkit `Postgrex`/`MyXQL`/
   `ecto_sqlite3` adapters use for query building, migrations, and
   `DBConnection` wiring) with `EctoFdbRelational.Protocol` as the
-  `DBConnection` driver -- see the README's ADR for why this talks gRPC
-  directly to `fdb-relational-server`'s `JDBCService` instead of going
-  through JDBC/an embedded JVM/a Rust NIF.
+  `DBConnection` driver -- see ADR 0003 for why this embeds FRL in-process
+  via a Rustler NIF + JNI instead of talking gRPC to a separately-managed
+  `fdb-relational-server` process.
 
   See `EctoFdbRelational.Adapter.Connection` and the README's "Known gaps"
   section for exactly what subset of Ecto's query API and migrations are
@@ -61,7 +60,7 @@ defmodule EctoFdbRelational.Adapter do
       {:ok, _} ->
         :ok
 
-      {:error, %EctoFdbRelational.Error{grpc_reason: reason}} when is_binary(reason) ->
+      {:error, %EctoFdbRelational.Error{message: reason}} when is_binary(reason) ->
         # Best-effort, *not* independently verified this session: we infer
         # "already exists" from the word "exist" showing up in the server's
         # error message (the one FRL error string we *did* verify this
