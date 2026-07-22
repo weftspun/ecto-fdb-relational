@@ -99,11 +99,18 @@ defmodule EctoFdbRelational.Types do
   (a bound parameter in *both* the SET and WHERE clauses) fails with
   `unable to encapsulate comparison operation due to type mismatch(es)`,
   even though the exact same two parameters bind correctly in a `SELECT`.
-  Literal-only SQL text (proved to work reliably for DDL and simple
-  DML throughout this adapter's own testing) sidesteps that planner path
-  entirely, so `EctoFdbRelational.Protocol.handle_execute/4` inlines
-  `:update`/`:delete` parameters as literals via this function instead of
-  binding them, rather than depending on an upstream FRL fix.
+
+  This isn't only a workaround for a bug, either: FRL's own documented
+  `UPDATE` grammar
+  (https://foundationdb.github.io/fdb-record-layer/reference/sql_commands/DML/UPDATE.html)
+  defines `SET columnName = literal | identifier` -- a bind parameter was
+  never a documented right-hand side for `SET` at all, and every example
+  in that doc (`SET C = 20`, `SET B = 'zero', C = 0.0`) uses literals.
+  Literal-only SQL text is therefore the *documented* way to use
+  `UPDATE`, not merely a lucky-to-work-around-a-bug fallback, so
+  `EctoFdbRelational.Protocol.handle_execute/4` inlines `:update`/
+  `:delete` parameters as literals via this function instead of binding
+  them.
 
   String values are escaped by doubling embedded single quotes (the
   SQL-standard escape), matching the syntax verified against
