@@ -125,10 +125,12 @@ defmodule EctoFdbRelational.Protocol do
 
   @impl true
   def handle_execute(%Query{statement: statement, command: command} = query, params, opts, state) do
+    sql = IO.iodata_to_binary(statement)
+
     request = %StatementRequest{
-      sql: IO.iodata_to_binary(statement),
-      database: state.database,
-      schema: state.schema,
+      sql: sql,
+      database: unless(catalog_level_ddl?(sql), do: state.database),
+      schema: unless(catalog_level_ddl?(sql), do: state.schema),
       parameters: %Parameters{parameter: Enum.map(params, &encode_parameter/1)}
     }
 
@@ -141,6 +143,18 @@ defmodule EctoFdbRelational.Protocol do
 
     call_and_decode(rpc_fun, state.channel, request, grpc_opts, query, state)
   end
+
+  # EctoFdbRelational.Ddl's bootstrap statements (DROP/CREATE DATABASE,
+  # CREATE/DROP SCHEMA TEMPLATE) fully qualify their own target in the SQL
+  # text and operate above any single database/schema -- unlike this
+  # module's other statement forms, they're one thing FRL's own DDL
+  # dialect issues before the target database necessarily exists yet.
+  # fdb-relational-server rejects *any* StatementRequest whose `database`
+  # field doesn't already exist, even when the SQL itself doesn't
+  # reference that field at all, so these must omit it.
+  @catalog_level_ddl ~r/\A\s*(CREATE|DROP)\s+(DATABASE|SCHEMA\s+TEMPLATE)\b/i
+
+  defp catalog_level_ddl?(sql), do: Regex.match?(@catalog_level_ddl, sql)
 
   defp encode_parameter(value) do
     %Parameter{parameter: Types.encode_param(value)}
