@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+Two insert-path bugs found while running a real TPC-C-style workload
+(`ecto_bench_tpcc`) against a live cluster -- both were silent/blocking for
+*any* caller, not edge cases:
+
+* `EctoFdbRelational.Types.encode_param/1`, `java_sql_type_code/1` and
+  `encode_literal/1` now encode `NaiveDateTime`/`DateTime` as epoch-millis
+  `BIGINT`s, matching `ddl_type/1`'s existing `*_datetime` -> `BIGINT`
+  mapping (see `Types.epoch_millis/1`). Without this, `Ecto.Migrator`
+  itself couldn't run *any* migration against this adapter -- it
+  unconditionally inserts a `NaiveDateTime` into
+  `schema_migrations.inserted_at`. Write-only for now:
+  `Types.decode_column/1` does not yet convert a `BIGINT` column back into
+  either struct on read -- see its moduledoc.
+* Fixed `INSERT` statements silently binding parameters to the wrong
+  columns whenever a table's declared column order (from its migration)
+  differed from Ecto's own column order for that insert (in practice,
+  close to alphabetical). FRL's `PreparedStatement` binds each `?` to a
+  table's *declared* column position, not the position of the matching
+  column name in the column list the `INSERT` statement actually sends --
+  `EctoFdbRelational.Protocol.handle_execute/4` now reorders both the
+  column list and the bound params to match before sending, via the new
+  `EctoFdbRelational.SchemaTemplate.column_order/3` and
+  `reorder_to_declared/3`.
+
 ## v0.3.0
 
 Real `Repo.transaction/2` support -- multiple statements now batch into one FDB

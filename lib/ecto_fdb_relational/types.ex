@@ -31,15 +31,28 @@ defmodule EctoFdbRelational.Types do
   `SQL_Getting_Started.md`) are **not** converted yet -- see the README
   "Known gaps" section. Attempting to encode/decode one of those raises
   `EctoFdbRelational.Error` rather than silently corrupting data.
+
+  `NaiveDateTime`/`DateTime` are a partial exception: `encode_param/1`,
+  `java_sql_type_code/1` and `encode_literal/1` all convert them to
+  epoch-millis `BIGINT`s (matching `ddl_type/1`'s own `*_datetime` ->
+  `BIGINT` mapping), so writes work -- but `decode_column/1` does not
+  convert a `BIGINT` result-set cell back into either struct, so reading
+  a `*_datetime` column back out currently yields a plain integer, not a
+  `NaiveDateTime`/`DateTime`. This was a real, blocking gap: `Ecto.Migrator`
+  itself unconditionally inserts a `NaiveDateTime` into
+  `schema_migrations.inserted_at`, so without this, no migration could run
+  against this adapter at all, for any caller.
   """
 
   alias Grpc.Relational.Jdbc.V1.Column
 
   @typedoc """
   Every value `encode_param/1`, `java_sql_type_code/1` and `encode_literal/1`
-  actually accept without raising -- the v0.1 scalar scope documented above.
+  actually accept without raising -- the v0.1 scalar scope documented above,
+  plus `NaiveDateTime`/`DateTime` (see `epoch_millis/1`).
   """
-  @type scalar :: nil | boolean() | number() | Decimal.t() | binary()
+  @type scalar ::
+          nil | boolean() | number() | Decimal.t() | binary() | NaiveDateTime.t() | DateTime.t()
 
   @doc """
   Encodes an Elixir term (already dumped by Ecto's type system) into a
@@ -52,6 +65,10 @@ defmodule EctoFdbRelational.Types do
   def encode_param(value) when is_float(value), do: %Column{kind: {:double, value}}
   def encode_param(%Decimal{} = value), do: %Column{kind: {:double, Decimal.to_float(value)}}
   def encode_param(value) when is_binary(value), do: %Column{kind: {:string, value}}
+
+  def encode_param(%mod{} = value) when mod in [NaiveDateTime, DateTime] do
+    %Column{kind: {:long, epoch_millis(value)}}
+  end
 
   def encode_param(value) do
     raise EctoFdbRelational.Error,
@@ -86,6 +103,7 @@ defmodule EctoFdbRelational.Types do
   def java_sql_type_code(value) when is_float(value), do: @sql_type_double
   def java_sql_type_code(%Decimal{}), do: @sql_type_double
   def java_sql_type_code(value) when is_binary(value), do: @sql_type_varchar
+  def java_sql_type_code(%mod{}) when mod in [NaiveDateTime, DateTime], do: @sql_type_bigint
 
   def java_sql_type_code(value) do
     raise EctoFdbRelational.Error,
@@ -135,6 +153,10 @@ defmodule EctoFdbRelational.Types do
     "'" <> String.replace(value, "'", "''") <> "'"
   end
 
+  def encode_literal(%mod{} = value) when mod in [NaiveDateTime, DateTime] do
+    Integer.to_string(epoch_millis(value))
+  end
+
   def encode_literal(value) do
     raise EctoFdbRelational.Error,
       message:
@@ -164,6 +186,19 @@ defmodule EctoFdbRelational.Types do
       acc <> encode_literal(param) <> part
     end)
   end
+
+  @doc """
+  Converts a `NaiveDateTime`/`DateTime` to milliseconds since the Unix
+  epoch, matching `ddl_type/1`'s `*_datetime` family -> `BIGINT` mapping
+  (write side only -- see `decode_column/1`, which does not yet convert a
+  `BIGINT` column back into one of these structs on read).
+  """
+  @spec epoch_millis(NaiveDateTime.t() | DateTime.t()) :: integer()
+  def epoch_millis(%NaiveDateTime{} = value) do
+    NaiveDateTime.diff(value, ~N[1970-01-01 00:00:00], :millisecond)
+  end
+
+  def epoch_millis(%DateTime{} = value), do: DateTime.to_unix(value, :millisecond)
 
   @doc """
   Decodes a `Column` message (a result-set cell) back into a plain Elixir

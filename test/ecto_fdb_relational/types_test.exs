@@ -20,6 +20,30 @@ defmodule EctoFdbRelational.TypesTest do
       assert %Column{kind: {:double, 1.5}} = Types.encode_param(Decimal.new("1.5"))
     end
 
+    # Regression coverage: Ecto.Migrator's own SchemaMigration always
+    # inserts a NaiveDateTime into schema_migrations.inserted_at, so
+    # without this, no migration could run against this adapter at all --
+    # not a hypothetical, this reproduced against a real cluster. See
+    # ddl_type/1's *_datetime -> BIGINT mapping, which this matches.
+    test "encodes a NaiveDateTime as epoch-millis, matching ddl_type/1's BIGINT mapping" do
+      assert %Column{kind: {:long, 0}} = Types.encode_param(~N[1970-01-01 00:00:00])
+      assert %Column{kind: {:long, 1000}} = Types.encode_param(~N[1970-01-01 00:00:01])
+
+      assert %Column{kind: {:long, millis}} = Types.encode_param(~N[2024-01-01 00:00:00.500])
+
+      assert millis ==
+               NaiveDateTime.diff(
+                 ~N[2024-01-01 00:00:00.500],
+                 ~N[1970-01-01 00:00:00],
+                 :millisecond
+               )
+    end
+
+    test "encodes a DateTime as epoch-millis" do
+      assert %Column{kind: {:long, 0}} = Types.encode_param(~U[1970-01-01 00:00:00Z])
+      assert %Column{kind: {:long, 1000}} = Types.encode_param(~U[1970-01-01 00:00:01Z])
+    end
+
     test "raises a clear error for values it doesn't know how to encode yet" do
       assert_raise EctoFdbRelational.Error, ~r/does not know how to encode/, fn ->
         Types.encode_param({:a, :tuple})
@@ -40,6 +64,8 @@ defmodule EctoFdbRelational.TypesTest do
       assert Types.java_sql_type_code(1.5) == 8
       assert Types.java_sql_type_code(Decimal.new("1.5")) == 8
       assert Types.java_sql_type_code("hi") == 12
+      assert Types.java_sql_type_code(~N[2024-01-01 00:00:00]) == -5
+      assert Types.java_sql_type_code(~U[2024-01-01 00:00:00Z]) == -5
     end
   end
 
@@ -58,6 +84,8 @@ defmodule EctoFdbRelational.TypesTest do
       assert Types.encode_literal(1.5) == "1.5"
       assert Types.encode_literal(Decimal.new("1.5")) == "1.5"
       assert Types.encode_literal("Alice") == "'Alice'"
+      assert Types.encode_literal(~N[1970-01-01 00:00:01]) == "1000"
+      assert Types.encode_literal(~U[1970-01-01 00:00:01Z]) == "1000"
     end
 
     test "escapes embedded single quotes by doubling them (the SQL-standard escape)" do
@@ -147,6 +175,28 @@ defmodule EctoFdbRelational.TypesTest do
     test "decodes the deprecated null variant and the typed nullType variant both as nil" do
       assert Types.decode_column(%Column{kind: {:null, %{}}}) == nil
       assert Types.decode_column(%Column{kind: {:nullType, 0}}) == nil
+    end
+
+    # Documents the write-only asymmetry deliberately, rather than letting
+    # it be silently rediscovered: encode_param/1 turns a NaiveDateTime
+    # into a plain BIGINT Column, and decode_column/1 has no *_datetime
+    # case, so it comes back as a plain integer, not a NaiveDateTime.
+    test "a NaiveDateTime written via encode_param/1 decodes back as a plain integer, not a struct" do
+      value = ~N[2024-01-01 00:00:01]
+      assert Types.decode_column(Types.encode_param(value)) == 1_704_067_201_000
+    end
+  end
+
+  describe "epoch_millis/1" do
+    test "converts a NaiveDateTime to milliseconds since the Unix epoch" do
+      assert Types.epoch_millis(~N[1970-01-01 00:00:00]) == 0
+      assert Types.epoch_millis(~N[1970-01-01 00:00:01]) == 1000
+      assert Types.epoch_millis(~N[1969-12-31 23:59:59]) == -1000
+    end
+
+    test "converts a DateTime to milliseconds since the Unix epoch" do
+      assert Types.epoch_millis(~U[1970-01-01 00:00:00Z]) == 0
+      assert Types.epoch_millis(~U[1970-01-01 00:00:01Z]) == 1000
     end
   end
 end

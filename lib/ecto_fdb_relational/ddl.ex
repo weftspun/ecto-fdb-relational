@@ -105,7 +105,8 @@ defmodule EctoFdbRelational.Ddl do
   defp put_table_and_rematerialize(table, columns) do
     {database, schema} = ddl_context!()
     fragment = render_table(table, columns)
-    SchemaTemplate.put_table(database, schema, to_string(table.name), fragment)
+    column_order = for {:add, col_name, _type, _opts} <- columns, do: to_string(col_name)
+    SchemaTemplate.put_table(database, schema, to_string(table.name), fragment, column_order)
     rematerialize(database, schema)
   end
 

@@ -60,16 +60,81 @@ defmodule EctoFdbRelational.SchemaTemplate do
     }
   end
 
-  @doc "Registers (or replaces) a table's DDL fragment for `{database, schema}`."
-  def put_table(database, schema, table_name, ddl_fragment) do
+  @doc """
+  Registers (or replaces) a table's DDL fragment for `{database, schema}`,
+  along with its declared column order (`column_order`, a list of column-name strings in the order the `CREATE TABLE` columns were declared) -- see
+  `column_order/3` for why that order needs to be kept around separately
+  from the fragment text.
+  """
+  def put_table(database, schema, table_name, ddl_fragment, column_order \\ nil) do
     ensure_started()
 
     Agent.update(__MODULE__, fn state ->
       key = {database, schema}
       entry = Map.get(state, key, %__MODULE__{})
-      tables = Map.put(entry.tables, table_name, ddl_fragment)
+
+      tables =
+        Map.put(entry.tables, table_name, %{fragment: ddl_fragment, columns: column_order})
+
       Map.put(state, key, %{entry | tables: tables, version: entry.version + 1})
     end)
+  end
+
+  @doc """
+  The column order `table_name` was declared with (a list of column-name strings),
+  or `nil` if this table isn't known.
+
+  `EctoFdbRelational.Protocol.handle_execute/4` needs this: FRL's
+  `PreparedStatement` parameter binding turns out to bind each `?` to the
+  table's *declared* column position, not the position of the matching
+  column name in the `INSERT INTO tbl (a, b, c) VALUES (?, ?, ?)` column
+  list actually sent -- despite the column list being present and
+  correctly named. Ecto's own column list order for an insert follows
+  `Ecto.Schema`'s (effectively alphabetical, via a `Map`-backed changeset)
+  field order, which routinely differs from a migration's declared column
+  order, so without reordering to match, values silently bind to the wrong
+  columns whenever the two orders differ (and simply error out when the
+  types at the swapped positions don't happen to match, as happened here).
+  """
+  def column_order(database, schema, table_name) do
+    ensure_started()
+
+    Agent.get(__MODULE__, fn state ->
+      case Map.get(state, {database, schema}, %__MODULE__{}).tables[table_name] do
+        %{columns: columns} -> columns
+        _ -> nil
+      end
+    end)
+  end
+
+  @doc """
+  Permutes an INSERT statement's own column list (`columns`) and its bound
+  `params` (given in that same order) to match `declared` -- see
+  `column_order/3`'s moduledoc for why. A column absent from `declared`
+  (shouldn't happen for a table this module actually created, but keeps
+  this total rather than raising) sorts after every known column, in its
+  original relative order.
+
+      iex> EctoFdbRelational.SchemaTemplate.reorder_to_declared(
+      ...>   ["i_data", "i_id", "i_price"],
+      ...>   ["hi", 1, 9.99],
+      ...>   ["i_id", "i_price", "i_data"]
+      ...> )
+      {["i_id", "i_price", "i_data"], [1, 9.99, "hi"]}
+  """
+  @spec reorder_to_declared([String.t()], [term()], [String.t()]) ::
+          {[String.t()], [term()]}
+  def reorder_to_declared(columns, params, declared) do
+    rank = declared |> Enum.with_index() |> Map.new()
+    unranked = map_size(rank)
+
+    order =
+      columns
+      |> Enum.with_index()
+      |> Enum.sort_by(fn {col, _i} -> Map.get(rank, col, unranked) end)
+      |> Enum.map(fn {_col, i} -> i end)
+
+    {Enum.map(order, &Enum.at(columns, &1)), Enum.map(order, &Enum.at(params, &1))}
   end
 
   @doc "Removes a table (used by `drop table(...)`)."
@@ -118,7 +183,8 @@ defmodule EctoFdbRelational.SchemaTemplate do
 
     Agent.get(__MODULE__, fn state ->
       entry = Map.get(state, {database, schema}, %__MODULE__{})
-      fragments = Map.values(entry.tables) ++ Map.values(entry.indexes)
+      table_fragments = entry.tables |> Map.values() |> Enum.map(& &1.fragment)
+      fragments = table_fragments ++ Map.values(entry.indexes)
       name = template_name(database, schema, entry.version)
       {name, fragments, entry.version}
     end)

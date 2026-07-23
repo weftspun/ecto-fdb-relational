@@ -64,7 +64,7 @@ defmodule EctoFdbRelational.Protocol do
 
   @behaviour DBConnection
 
-  alias EctoFdbRelational.{Error, Native, Query, Types}
+  alias EctoFdbRelational.{Error, Native, Query, SchemaTemplate, Types}
   alias Grpc.Relational.Jdbc.V1.{Parameter, Parameters, StatementRequest, StatementResponse}
 
   defstruct [:conn, :database, :schema, :cluster_file, :txn]
@@ -172,6 +172,18 @@ defmodule EctoFdbRelational.Protocol do
   # says.
   @update_statement ~r/\AUPDATE\s/i
 
+  # FRL's PreparedStatement parameter binding turns out to bind each `?` to
+  # the target table's *declared* column position, not the position of the
+  # matching column name in this statement's own column list -- despite that
+  # column list being present and correctly named. `Ecto.Adapters.SQL`'s own
+  # column order for an INSERT follows `Ecto.Schema`'s field order (in
+  # practice close to alphabetical, since it comes from a `Map`), which
+  # routinely differs from a migration's declared column order, so without
+  # reordering both the column list text and `params` together to match, the
+  # wrong values silently land in the wrong columns -- see
+  # EctoFdbRelational.SchemaTemplate.column_order/3's moduledoc.
+  @insert_statement ~r/\AINSERT INTO\s+(\S+)\s*\(([^)]*)\)/i
+
   @impl true
   def handle_execute(%Query{statement: statement} = query, params, _opts, state) do
     sql = IO.iodata_to_binary(statement)
@@ -197,6 +209,8 @@ defmodule EctoFdbRelational.Protocol do
       if Regex.match?(@update_statement, sql) and params != [],
         do: {Types.inline_literals(sql, params), []},
         else: {sql, params}
+
+    {sql, params} = reorder_insert_to_declared_columns(sql, params, database, schema)
 
     request = %StatementRequest{
       sql: sql,
@@ -230,6 +244,22 @@ defmodule EctoFdbRelational.Protocol do
     end
   rescue
     e in EctoFdbRelational.Error -> {:error, e, state}
+  end
+
+  defp reorder_insert_to_declared_columns(sql, params, database, schema) do
+    with [_, table, column_list] <- Regex.run(@insert_statement, sql),
+         declared when is_list(declared) <-
+           SchemaTemplate.column_order(database, schema, String.downcase(table)) do
+      columns = column_list |> String.split(",") |> Enum.map(&String.trim/1)
+      {new_columns, new_params} = SchemaTemplate.reorder_to_declared(columns, params, declared)
+
+      new_sql =
+        Regex.replace(@insert_statement, sql, "INSERT INTO \\1 (#{Enum.join(new_columns, ", ")})")
+
+      {new_sql, new_params}
+    else
+      _ -> {sql, params}
+    end
   end
 
   defp encode_parameter(value) do
@@ -277,10 +307,23 @@ defmodule EctoFdbRelational.Protocol do
     end
   end
 
+  # A commit/rollback failure (e.g. FDB's own "not_committed" conflict
+  # error) still ends the underlying FDB transaction -- there is no
+  # "retry the same transaction handle" in FDB's model, only "start a new
+  # transaction" (see EctoFdbRelational.Native.begin/3). Leaving `state.txn`
+  # pointing at that now-dead handle after an error left the *pooled
+  # connection* permanently wedged: every later call on it (transactional
+  # or not, from any caller that later checks out this same connection)
+  # tried to run against a transaction that was already finished, raising
+  # "this transaction is already finished" for completely unrelated
+  # queries. Reproduced by adding a retry loop around a conflicting
+  # Repo.transaction/2 (see EctoBenchTpcc.Tpcc.Retry in ecto_bench_tpcc):
+  # retrying after a conflict is exactly a failed handle_commit/2, so this
+  # bug fires on every single conflict retry.
   @impl true
   def handle_commit(_opts, state) do
     case Native.commit(state.txn) do
-      {:error, reason} -> {:error, Error.from_reason(reason), state}
+      {:error, reason} -> {:error, Error.from_reason(reason), %{state | txn: nil}}
       :ok -> {:ok, %{}, %{state | txn: nil}}
     end
   end
@@ -288,7 +331,7 @@ defmodule EctoFdbRelational.Protocol do
   @impl true
   def handle_rollback(_opts, state) do
     case Native.rollback(state.txn) do
-      {:error, reason} -> {:error, Error.from_reason(reason), state}
+      {:error, reason} -> {:error, Error.from_reason(reason), %{state | txn: nil}}
       :ok -> {:ok, %{}, %{state | txn: nil}}
     end
   end
