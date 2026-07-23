@@ -307,10 +307,23 @@ defmodule EctoFdbRelational.Protocol do
     end
   end
 
+  # A commit/rollback failure (e.g. FDB's own "not_committed" conflict
+  # error) still ends the underlying FDB transaction -- there is no
+  # "retry the same transaction handle" in FDB's model, only "start a new
+  # transaction" (see EctoFdbRelational.Native.begin/3). Leaving `state.txn`
+  # pointing at that now-dead handle after an error left the *pooled
+  # connection* permanently wedged: every later call on it (transactional
+  # or not, from any caller that later checks out this same connection)
+  # tried to run against a transaction that was already finished, raising
+  # "this transaction is already finished" for completely unrelated
+  # queries. Reproduced by adding a retry loop around a conflicting
+  # Repo.transaction/2 (see EctoBenchTpcc.Tpcc.Retry in ecto_bench_tpcc):
+  # retrying after a conflict is exactly a failed handle_commit/2, so this
+  # bug fires on every single conflict retry.
   @impl true
   def handle_commit(_opts, state) do
     case Native.commit(state.txn) do
-      {:error, reason} -> {:error, Error.from_reason(reason), state}
+      {:error, reason} -> {:error, Error.from_reason(reason), %{state | txn: nil}}
       :ok -> {:ok, %{}, %{state | txn: nil}}
     end
   end
@@ -318,7 +331,7 @@ defmodule EctoFdbRelational.Protocol do
   @impl true
   def handle_rollback(_opts, state) do
     case Native.rollback(state.txn) do
-      {:error, reason} -> {:error, Error.from_reason(reason), state}
+      {:error, reason} -> {:error, Error.from_reason(reason), %{state | txn: nil}}
       :ok -> {:ok, %{}, %{state | txn: nil}}
     end
   end
